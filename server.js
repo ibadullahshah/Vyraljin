@@ -157,15 +157,26 @@ app.post('/api/railway-usage', express.json(), (req, res) => {
   r.end();
 });
 
-// SIMPLE RENDER (no FFmpeg — passthrough)
-app.post('/api/render', upload.fields([{ name: 'video', maxCount: 1 }]), (req, res) => {
-  const vf = req.files['video'] && req.files['video'][0];
-  if (!vf) return res.status(400).json({ error: 'No video' });
-  const stream = fs.createReadStream(vf.path);
-  res.setHeader('Content-Type', 'video/mp4');
-  stream.pipe(res);
-  stream.on('end', () => fs.unlink(vf.path, () => {}));
-  stream.on('error', () => fs.unlink(vf.path, () => {}));
+// SIMPLE RENDER (no FFmpeg — passthrough). Accepts video + optional overlay + any text fields.
+app.post('/api/render', upload.any(), (req, res) => {
+  try {
+    const files = req.files || [];
+    const vf = files.find(f => f.fieldname === 'video');
+    const ovf = files.find(f => f.fieldname === 'overlay');
+    if (!vf) {
+      files.forEach(f => { try { fs.unlink(f.path, () => {}); } catch (e) {} });
+      return res.status(400).json({ error: 'No video' });
+    }
+    // Overlay abhi burn nahi karte (FFmpeg nahi) — sirf original video wapas bhejte hain
+    if (ovf) { try { fs.unlink(ovf.path, () => {}); } catch (e) {} }
+    const stream = fs.createReadStream(vf.path);
+    res.setHeader('Content-Type', 'video/mp4');
+    stream.pipe(res);
+    stream.on('end', () => { try { fs.unlink(vf.path, () => {}); } catch (e) {} });
+    stream.on('error', () => { try { fs.unlink(vf.path, () => {}); } catch (e) {} });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
