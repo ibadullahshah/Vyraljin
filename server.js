@@ -3,6 +3,17 @@ const multer = require('multer');
 const cors = require('cors');
 const fs = require('fs');
 const https = require('https');
+const path = require('path');
+const { execFile } = require('child_process');
+
+// FFmpeg (optional — agar load na ho to render passthrough ho jayega, crash nahi)
+let ffmpegPath = null;
+try {
+  ffmpegPath = require('ffmpeg-static');
+  console.log('FFmpeg ready:', ffmpegPath);
+} catch (e) {
+  console.warn('ffmpeg-static not found — render will passthrough:', e.message);
+}
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -16,7 +27,7 @@ const ENV_KEY  = process.env.BUNNY_KEY  || '';
 const BUNNY_HOST = process.env.BUNNY_HOST || 'storage.bunnycdn.com';
 
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
-app.get('/health', (req, res) => res.json({ status: 'ok', server: 'live', envZone: !!ENV_ZONE, envKey: !!ENV_KEY }));
+app.get('/health', (req, res) => res.json({ status: 'ok', server: 'live', envZone: !!ENV_ZONE, envKey: !!ENV_KEY, ffmpeg: !!ffmpegPath }));
 
 // CONFIG — app isse Bunny/Gemini status leta hai (tokens NAHI bhejte, sirf flags + pullzone)
 app.get('/api/config', (req, res) => {
@@ -157,26 +168,64 @@ app.post('/api/railway-usage', express.json(), (req, res) => {
   r.end();
 });
 
-// SIMPLE RENDER (no FFmpeg — passthrough). Accepts video + optional overlay + any text fields.
+// RENDER — FFmpeg overlay (banner+text PNG) burn onto video + optional trim.
+// Agar ffmpeg na mile ya overlay na ho, to seedha video wapas (passthrough).
 app.post('/api/render', upload.any(), (req, res) => {
-  try {
-    const files = req.files || [];
-    const vf = files.find(f => f.fieldname === 'video');
-    const ovf = files.find(f => f.fieldname === 'overlay');
-    if (!vf) {
-      files.forEach(f => { try { fs.unlink(f.path, () => {}); } catch (e) {} });
-      return res.status(400).json({ error: 'No video' });
-    }
-    // Overlay abhi burn nahi karte (FFmpeg nahi) — sirf original video wapas bhejte hain
-    if (ovf) { try { fs.unlink(ovf.path, () => {}); } catch (e) {} }
+  const files = req.files || [];
+  const vf = files.find(f => f.fieldname === 'video');
+  const ovf = files.find(f => f.fieldname === 'overlay');
+  const cleanup = (extra) => { [vf, ovf, extra].forEach(f => { if (f && f.path) { try { fs.unlink(f.path, () => {}); } catch (e) {} } }); };
+
+  if (!vf) { cleanup(); return res.status(400).json({ error: 'No video' }); }
+
+  const trimStart = parseFloat(req.body.trimStart) || 0;
+  const trimEnd = parseFloat(req.body.trimEnd) || 0;
+  const duration = (trimEnd > trimStart) ? (trimEnd - trimStart) : 0;
+
+  // Passthrough case: koi overlay nahi ya ffmpeg available nahi
+  if (!ovf || !ffmpegPath) {
     const stream = fs.createReadStream(vf.path);
     res.setHeader('Content-Type', 'video/mp4');
     stream.pipe(res);
-    stream.on('end', () => { try { fs.unlink(vf.path, () => {}); } catch (e) {} });
-    stream.on('error', () => { try { fs.unlink(vf.path, () => {}); } catch (e) {} });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    stream.on('end', () => cleanup());
+    stream.on('error', () => cleanup());
+    return;
   }
+
+  const outPath = vf.path + '_out.mp4';
+  // FFmpeg args: video + overlay PNG ko scale karke overlay karo, phir encode
+  const args = ['-y'];
+  if (trimStart > 0) args.push('-ss', String(trimStart));
+  args.push('-i', vf.path);
+  args.push('-i', ovf.path);
+  if (duration > 0) args.push('-t', String(duration));
+  // overlay ko video ke size par scale karo, phir (0,0) par overlay
+  args.push('-filter_complex', '[1:v]scale=iw:ih[ov];[0:v][ov]overlay=0:0:format=auto[v]');
+  args.push('-map', '[v]', '-map', '0:a?');
+  args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p');
+  args.push('-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart');
+  args.push(outPath);
+
+  execFile(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 64, timeout: 170000 }, (err) => {
+    if (err || !fs.existsSync(outPath)) {
+      console.error('ffmpeg error:', err && err.message);
+      // fallback: original video wapas bhejo (feature fail na ho)
+      try {
+        const stream = fs.createReadStream(vf.path);
+        res.setHeader('Content-Type', 'video/mp4');
+        stream.pipe(res);
+        stream.on('end', () => cleanup());
+        stream.on('error', () => cleanup());
+      } catch (e) { cleanup(); res.status(500).json({ error: 'render failed' }); }
+      return;
+    }
+    const stream = fs.createReadStream(outPath);
+    res.setHeader('Content-Type', 'video/mp4');
+    stream.pipe(res);
+    const done = () => { cleanup(); try { fs.unlink(outPath, () => {}); } catch (e) {} };
+    stream.on('end', done);
+    stream.on('error', done);
+  });
 });
 
 const PORT = process.env.PORT || 3000;
