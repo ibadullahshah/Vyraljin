@@ -17,6 +17,17 @@ const ENV_KEY  = process.env.BUNNY_KEY  || '';
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', server: 'live', envZone: !!ENV_ZONE, envKey: !!ENV_KEY }));
 
+// CONFIG — app isse Bunny/Gemini status leta hai (tokens NAHI bhejte, sirf flags + pullzone)
+app.get('/api/config', (req, res) => {
+  const pullzone = process.env.BUNNY_PULLZONE || (ENV_ZONE ? ('https://' + ENV_ZONE + '.b-cdn.net') : '');
+  res.json({
+    hasBunny: !!(ENV_ZONE && ENV_KEY),
+    pullzone: pullzone,
+    zone: ENV_ZONE || '',
+    hasGemini: !!process.env.GEMINI_KEY
+  });
+});
+
 // BUNNY: LIST
 app.get('/api/bunny-list', (req, res) => {
   const zone = req.query.zone || ENV_ZONE;
@@ -47,6 +58,63 @@ app.post('/api/bunny-upload', (req, res) => {
     r.write(body);
     r.end();
   });
+});
+
+// BUNNY: DOWNLOAD (verify + read sidecars/files)
+app.get('/api/bunny-download', (req, res) => {
+  const zone = req.query.zone || ENV_ZONE;
+  const key  = req.query.key  || ENV_KEY;
+  const file = req.query.file;
+  if (!zone || !key || !file) return res.status(400).json({ error: 'Missing params' });
+  const r = https.request({ hostname: 'storage.bunnycdn.com', path: '/' + encodeURIComponent(zone) + '/' + encodeURIComponent(file), method: 'GET', headers: { 'AccessKey': key } }, (resp) => {
+    if (resp.statusCode >= 400) { res.status(resp.statusCode).end(); return; }
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    resp.pipe(res);
+  });
+  r.on('error', e => res.status(500).json({ error: e.message }));
+  r.end();
+});
+
+// PROXY-FETCH (CDN download fallback for weak networks)
+app.get('/api/proxy-fetch', (req, res) => {
+  const target = req.query.url;
+  if (!target || !/^https:\/\/[a-zA-Z0-9.-]*\.(b-cdn\.net|bunnycdn\.com)/i.test(target)) {
+    return res.status(400).json({ error: 'Invalid or disallowed URL' });
+  }
+  https.get(target, (resp) => {
+    if (resp.statusCode >= 400) { res.status(resp.statusCode).end(); return; }
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
+    resp.pipe(res);
+  }).on('error', e => res.status(500).json({ error: e.message }));
+});
+
+// GEMINI PROXY (AI hooks + captions)
+app.post('/api/gemini', express.json({ limit: '10mb' }), (req, res) => {
+  const gk = process.env.GEMINI_KEY;
+  if (!gk) return res.status(400).json({ error: 'Gemini key not configured' });
+  const { prompt, maxTokens } = req.body || {};
+  if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
+  const payload = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { maxOutputTokens: maxTokens || 2048 }
+  });
+  const r = https.request({
+    hostname: 'generativelanguage.googleapis.com',
+    path: '/v1beta/models/gemini-2.0-flash:generateContent?key=' + gk,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+  }, (resp) => {
+    let d = ''; resp.on('data', c => d += c); resp.on('end', () => {
+      try {
+        const j = JSON.parse(d);
+        const text = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0] && j.candidates[0].content.parts[0].text) || '';
+        res.json({ text: text, raw: j });
+      } catch (e) { res.status(500).json({ error: 'Parse error', body: d.slice(0, 200) }); }
+    });
+  });
+  r.on('error', e => res.status(500).json({ error: e.message }));
+  r.write(payload);
+  r.end();
 });
 
 // BUNNY: DELETE
