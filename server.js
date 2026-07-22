@@ -13,6 +13,7 @@ const upload = multer({ dest: '/tmp/uploads/', limits: { fileSize: 500 * 1024 * 
 // Env fallbacks — agar app query mein zone/key na bheje to yahan se le lo
 const ENV_ZONE = process.env.BUNNY_ZONE || '';
 const ENV_KEY  = process.env.BUNNY_KEY  || '';
+const BUNNY_HOST = process.env.BUNNY_HOST || 'storage.bunnycdn.com';
 
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', server: 'live', envZone: !!ENV_ZONE, envKey: !!ENV_KEY }));
@@ -33,7 +34,7 @@ app.get('/api/bunny-list', (req, res) => {
   const zone = req.query.zone || ENV_ZONE;
   const key  = req.query.key  || ENV_KEY;
   if (!zone || !key) return res.status(400).json({ error: 'Missing params' });
-  const r = https.request({ hostname: 'storage.bunnycdn.com', path: '/' + encodeURIComponent(zone) + '/', method: 'GET', headers: { 'AccessKey': key, 'Accept': 'application/json' } }, (resp) => {
+  const r = https.request({ hostname: BUNNY_HOST, path: '/' + encodeURIComponent(zone) + '/', method: 'GET', headers: { 'AccessKey': key, 'Accept': 'application/json' } }, (resp) => {
     let d = ''; resp.on('data', c => d += c); resp.on('end', () => { try { res.json(JSON.parse(d)); } catch (e) { res.status(500).json({ error: 'Parse error' }); } });
   });
   r.on('error', e => res.status(500).json({ error: e.message }));
@@ -51,7 +52,7 @@ app.post('/api/bunny-upload', (req, res) => {
   req.on('end', () => {
     const body = Buffer.concat(chunks);
     const ct = req.headers['content-type'] || 'application/octet-stream';
-    const r = https.request({ hostname: 'storage.bunnycdn.com', path: '/' + encodeURIComponent(zone) + '/' + encodeURIComponent(file), method: 'PUT', headers: { 'AccessKey': key, 'Content-Type': ct, 'Content-Length': body.length } }, (resp) => {
+    const r = https.request({ hostname: BUNNY_HOST, path: '/' + encodeURIComponent(zone) + '/' + encodeURIComponent(file), method: 'PUT', headers: { 'AccessKey': key, 'Content-Type': ct, 'Content-Length': body.length } }, (resp) => {
       let d = ''; resp.on('data', c => d += c); resp.on('end', () => res.json({ status: resp.statusCode, ok: resp.statusCode < 300 }));
     });
     r.on('error', e => res.status(500).json({ error: e.message }));
@@ -66,7 +67,7 @@ app.get('/api/bunny-download', (req, res) => {
   const key  = req.query.key  || ENV_KEY;
   const file = req.query.file;
   if (!zone || !key || !file) return res.status(400).json({ error: 'Missing params' });
-  const r = https.request({ hostname: 'storage.bunnycdn.com', path: '/' + encodeURIComponent(zone) + '/' + encodeURIComponent(file), method: 'GET', headers: { 'AccessKey': key } }, (resp) => {
+  const r = https.request({ hostname: BUNNY_HOST, path: '/' + encodeURIComponent(zone) + '/' + encodeURIComponent(file), method: 'GET', headers: { 'AccessKey': key } }, (resp) => {
     if (resp.statusCode >= 400) { res.status(resp.statusCode).end(); return; }
     res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
     resp.pipe(res);
@@ -124,7 +125,7 @@ app.delete('/api/bunny-delete', (req, res) => {
   const file = req.query.file;
   if (!zone || !key || !file) return res.status(400).json({ error: 'Missing params' });
   const fname = decodeURIComponent(file);
-  const r = https.request({ hostname: 'storage.bunnycdn.com', path: '/' + encodeURIComponent(zone) + '/' + fname, method: 'DELETE', headers: { 'AccessKey': key } }, (resp) => {
+  const r = https.request({ hostname: BUNNY_HOST, path: '/' + encodeURIComponent(zone) + '/' + fname, method: 'DELETE', headers: { 'AccessKey': key } }, (resp) => {
     let d = ''; resp.on('data', c => d += c); resp.on('end', () => res.json({ status: resp.statusCode, ok: resp.statusCode < 300 }));
   });
   r.on('error', e => res.status(500).json({ error: e.message }));
