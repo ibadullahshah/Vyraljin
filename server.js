@@ -13,7 +13,6 @@ app.use(cors());
 const jsonParser = express.json({ limit: '50mb' });
 
 const BUNNY_KEY = process.env.BUNNY_KEY || '';
-const BUNNY_HOST = process.env.BUNNY_HOST || 'storage.bunnycdn.com';
 const BUNNY_ZONE = process.env.BUNNY_ZONE || '';
 const BUNNY_PULLZONE = (process.env.BUNNY_PULLZONE || '').replace(/\/$/,'');
 const GEMINI_KEY = process.env.GEMINI_KEY || '';
@@ -28,7 +27,7 @@ let _scSaveTimer = null;
 function bunnyGetJSON(filename) {
   return new Promise((resolve) => {
     if (!BUNNY_KEY || !BUNNY_ZONE) return resolve(null);
-    const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'GET',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
+    const r = https.request({hostname:'storage.bunnycdn.com',path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'GET',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
       let d=''; resp.on('data',c=>d+=c); resp.on('end',()=>{
         if(resp.statusCode!==200) return resolve(null);
         try{ resolve(JSON.parse(d)); }catch(e){ resolve(null); }
@@ -41,7 +40,7 @@ function bunnyPutJSON(filename, data) {
   return new Promise((resolve) => {
     if (!BUNNY_KEY || !BUNNY_ZONE) return resolve(false);
     const body = Buffer.from(JSON.stringify(data));
-    const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'PUT',headers:{'AccessKey':BUNNY_KEY,'Content-Type':'application/json','Content-Length':body.length}},(resp)=>{
+    const r = https.request({hostname:'storage.bunnycdn.com',path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'PUT',headers:{'AccessKey':BUNNY_KEY,'Content-Type':'application/json','Content-Length':body.length}},(resp)=>{
       resp.on('data',()=>{}); resp.on('end',()=>resolve(resp.statusCode<300));
     });
     r.on('error',()=>resolve(false)); r.write(body); r.end();
@@ -55,7 +54,7 @@ function saveShareCountsDebounced(){
 }
 
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
-app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, bunnyHost: BUNNY_HOST, gemini: !!GEMINI_KEY }));
+app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, gemini: !!GEMINI_KEY }));
 app.get('/api/config', (req, res) => res.json({ pullzone: BUNNY_PULLZONE, hasBunny: !!BUNNY_KEY, hasGemini: !!GEMINI_KEY }));
 
 app.post('/api/mark-shared', jsonParser, (req, res) => {
@@ -119,7 +118,7 @@ app.post('/api/gemini', jsonParser, async (req, res) => {
 
 app.get('/api/bunny-list', (req, res) => {
   if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
-  const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/',method:'GET',headers:{'AccessKey':BUNNY_KEY,'Accept':'application/json'}},(resp)=>{let d='';resp.on('data',c=>d+=c);resp.on('end',()=>{try{res.json(JSON.parse(d));}catch(e){res.status(500).json({error:'Parse error'})}});});
+  const r = https.request({hostname:'storage.bunnycdn.com',path:'/'+encodeURIComponent(BUNNY_ZONE)+'/',method:'GET',headers:{'AccessKey':BUNNY_KEY,'Accept':'application/json'}},(resp)=>{let d='';resp.on('data',c=>d+=c);resp.on('end',()=>{try{res.json(JSON.parse(d));}catch(e){res.status(500).json({error:'Parse error'})}});});
   r.on('error',e=>res.status(500).json({error:e.message})); r.end();
 });
 
@@ -131,7 +130,7 @@ app.get('/api/bunny-download', (req, res) => {
   if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
   const file = req.query.file;
   if (!file) return res.status(400).json({ error: 'No filename' });
-  const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(file),method:'GET',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
+  const r = https.request({hostname:'storage.bunnycdn.com',path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(file),method:'GET',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
     if (resp.statusCode >= 400) { res.status(resp.statusCode).end(); return; }
     res.setHeader('Content-Type', resp.headers['content-type'] || 'application/octet-stream');
     resp.pipe(res);
@@ -155,7 +154,7 @@ app.post('/api/bunny-upload', (req, res) => {
     const bodyBuf = Buffer.concat(chunks);
     console.log('[BUNNY-UPLOAD] file=' + file + ', mime=' + _mime + ', size=' + bodyBuf.length + ' bytes');
     if (bodyBuf.length === 0) console.log('[BUNNY-UPLOAD] WARNING: empty body for ' + file);
-    const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(file),method:'PUT',headers:{'AccessKey':BUNNY_KEY,'Content-Type':_mime,'Content-Length':bodyBuf.length}},(resp)=>{
+    const r = https.request({hostname:'storage.bunnycdn.com',path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(file),method:'PUT',headers:{'AccessKey':BUNNY_KEY,'Content-Type':_mime,'Content-Length':bodyBuf.length}},(resp)=>{
       let d='';resp.on('data',c=>d+=c);
       resp.on('end',()=>{
         console.log('[BUNNY-UPLOAD] ' + file + ' -> Bunny HTTP ' + resp.statusCode);
@@ -171,7 +170,7 @@ app.delete('/api/bunny-delete', (req, res) => {
   if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
   const file = req.query.file;
   if (!file) return res.status(400).json({ error: 'No filename' });
-  const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+decodeURIComponent(file),method:'DELETE',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{let d='';resp.on('data',c=>d+=c);resp.on('end',()=>res.json({status:resp.statusCode,ok:resp.statusCode<300}));});
+  const r = https.request({hostname:'storage.bunnycdn.com',path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+decodeURIComponent(file),method:'DELETE',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{let d='';resp.on('data',c=>d+=c);resp.on('end',()=>res.json({status:resp.statusCode,ok:resp.statusCode<300}));});
   r.on('error',e=>res.status(500).json({error:e.message})); r.end();
 });
 
@@ -215,8 +214,8 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
     const fcOv = '[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[base];[1:v]scale=trunc(iw/2)*2:trunc(ih/2)*2[ov];[base][ov]overlay=0:0:eof_action=repeat:format=auto[outv]';
     const trimArgs = dur > 0.5 ? ['-ss', String(ts), '-i', vf.path, '-t', String(dur)] : ['-i', vf.path];
     const args = of
-      ? ['-y','-filter_complex_threads','1',...trimArgs,'-i',of.path,'-filter_complex',fcOv,'-map','[outv]','-map','0:a?','-c:v','libx264','-preset','ultrafast','-threads','1','-crf','23','-pix_fmt','yuv420p','-c:a','aac','-b:a','128k','-movflags','+faststart','-max_muxing_queue_size','1024',out]
-      : ['-y','-filter_threads','1',...trimArgs,'-vf',scaleF,'-c:v','libx264','-preset','ultrafast','-threads','1','-crf','23','-pix_fmt','yuv420p','-c:a','aac','-b:a','128k','-movflags','+faststart','-max_muxing_queue_size','1024',out];
+      ? ['-y','-filter_complex_threads','1',...trimArgs,'-i',of.path,'-filter_complex',fcOv,'-map','[outv]','-map','0:a?','-c:v','libx264','-preset','veryfast','-threads','1','-crf','28','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart','-max_muxing_queue_size','1024',out]
+      : ['-y','-filter_threads','1',...trimArgs,'-vf',scaleF,'-c:v','libx264','-preset','veryfast','-threads','1','-crf','28','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart','-max_muxing_queue_size','1024',out];
     const ff = spawn(FFMPEG_BIN, args);
     _lastRenderErr='STEP 3: FFmpeg spawn hua, ARGS='+args.join(' ');
     let err = '';
