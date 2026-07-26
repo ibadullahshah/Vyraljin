@@ -167,6 +167,75 @@ app.post('/api/bunny-upload', (req, res) => {
   });
 });
 
+// ══════ RESUMABLE CHUNK UPLOAD — VyralJin ══════
+// App file ko 256KB tukron mein bhejti hai. Net toote to jitna aa chuka wo
+// /tmp mein mehfooz rehta hai — app usi offset se aagay bhejti hai, zero se
+// dobara kabhi nahi. Aakhri tukra aate hi poori file Bunny par PUT ho jati hai.
+const VJ_CHUNK_DIR = '/tmp/vj_chunks';
+if (!fs.existsSync(VJ_CHUNK_DIR)) fs.mkdirSync(VJ_CHUNK_DIR, { recursive: true });
+const vjChunkPath = f => VJ_CHUNK_DIR + '/' + String(f).replace(/[^a-zA-Z0-9._-]/g, '_');
+const vjDoneMap = {}; // file -> {done, bunnyOk, total, mime}
+
+function vjBunnyPutBuffer(file, buf, mime) {
+  return new Promise((resolve) => {
+    if (!BUNNY_KEY || !BUNNY_ZONE) return resolve(false);
+    const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(file),method:'PUT',headers:{'AccessKey':BUNNY_KEY,'Content-Type':mime||'video/mp4','Content-Length':buf.length}},(resp)=>{
+      resp.on('data',()=>{}); resp.on('end',()=>resolve(resp.statusCode<300));
+    });
+    r.on('error',()=>resolve(false)); r.write(buf); r.end();
+  });
+}
+
+async function vjFinalizeToBunny(f) {
+  const d = vjDoneMap[f]; if (!d || d.done) return d;
+  try {
+    const buf = fs.readFileSync(vjChunkPath(f));
+    const ok = await vjBunnyPutBuffer(f, buf, d.mime);
+    d.bunnyOk = ok; d.done = ok;
+    console.log('[CHUNK-UP] finalize ' + f + ' -> ' + (ok ? 'OK' : 'FAIL') + ', size=' + buf.length);
+    if (ok) { try { fs.unlinkSync(vjChunkPath(f)); } catch (e) {} }
+  } catch (e) { d.bunnyOk = false; d.done = false; }
+  return d;
+}
+
+app.get('/api/bunny-upload-status', async (req, res) => {
+  const f = req.query.file || '';
+  let received = 0;
+  try { received = fs.existsSync(vjChunkPath(f)) ? fs.statSync(vjChunkPath(f)).size : ((vjDoneMap[f] && vjDoneMap[f].total) || 0); } catch (e) {}
+  let d = vjDoneMap[f];
+  // Poora file aa chuka lekin Bunny PUT reh gaya tha — yahin dobara try ho jata hai
+  if (d && !d.done && d.total && received >= d.total) d = await vjFinalizeToBunny(f);
+  res.json({ ok: true, received: received, done: !!(d && d.done), bunnyOk: !(d && d.bunnyOk === false) });
+});
+
+app.post('/api/bunny-upload-chunk', (req, res) => {
+  const f = req.query.file || '';
+  const offset = parseInt(req.query.offset || '0', 10);
+  const total = parseInt(req.query.total || '0', 10);
+  const mime = req.query.mime || 'video/mp4';
+  if (!f || !total) return res.status(400).json({ ok: false, error: 'file/total missing' });
+  const chunks = [];
+  req.on('data', c => chunks.push(c));
+  req.on('end', async () => {
+    try {
+      const body = Buffer.concat(chunks);
+      if (!body.length) return res.status(400).json({ ok: false, error: 'empty chunk' });
+      const p = vjChunkPath(f);
+      const cur = fs.existsSync(p) ? fs.statSync(p).size : 0;
+      if (offset !== cur) return res.status(409).json({ ok: false, received: cur });
+      fs.appendFileSync(p, body);
+      const now = fs.statSync(p).size;
+      console.log('[CHUNK-UP] ' + f + ' @' + offset + ' +' + body.length + ' = ' + now + '/' + total);
+      if (now >= total) {
+        vjDoneMap[f] = { done: false, bunnyOk: false, total: total, mime: mime };
+        const d = await vjFinalizeToBunny(f);
+        return res.json({ ok: true, received: now, done: d.done, bunnyOk: d.bunnyOk });
+      }
+      res.json({ ok: true, received: now, done: false });
+    } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  });
+});
+
 app.delete('/api/bunny-delete', (req, res) => {
   if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
   const file = req.query.file;
