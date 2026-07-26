@@ -146,7 +146,8 @@ app.post('/api/bunny-upload', (req, res) => {
   // FIX: pehle hamesha 'video/mp4' Content-Type bhejta tha, chahe file JSON ya
   // image ho — extension se sahi mime-type nikalo taake JSON/image sidecar files
   // Bunny par sahi tarah save/serve hon.
-  const _extMimeMap = { '.json':'application/json', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.png':'image/png', '.webp':'image/webp', '.mp4':'video/mp4' };
+  const _extMimeMap = { '.json':'application/json', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.png':'image/png', '.webp':'image/webp', '.mp4':'video/mp4',
+    '.mp3':'audio/mpeg', '.m4a':'audio/mp4', '.aac':'audio/aac', '.wav':'audio/wav', '.ogg':'audio/ogg', '.opus':'audio/opus' };
   const _fext = ((file.match(/\.[^.]+$/) || [''])[0]).toLowerCase();
   const _mime = _extMimeMap[_fext] || 'application/octet-stream';
   const chunks = [];
@@ -260,7 +261,26 @@ app.post('/api/railway-usage', jsonParser, (req, res) => {
   r.on('error',e=>res.status(500).json({error:e.message})); r.write(body); r.end();
 });
 
-app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render request aayi! '+new Date().toISOString(); next(); }, upload.fields([{name:'video',maxCount:1},{name:'overlay',maxCount:1}]), (req, res) => {
+// ══════ MUSIC HELPER — Bunny URL se /tmp par download ══════
+function vjDownloadMusic(url) {
+  return new Promise((resolve) => {
+    if (!url || !/^https:\/\//i.test(url)) return resolve(null);
+    const ext = ((url.match(/\.(mp3|m4a|aac|wav|ogg|opus)(\?|$)/i) || [])[1] || 'mp3').toLowerCase();
+    const p = '/tmp/vjmus_' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.' + ext;
+    try {
+      const ws = fs.createWriteStream(p);
+      const rq = https.get(url, (resp) => {
+        if (resp.statusCode >= 400) { try { ws.close(); fs.unlinkSync(p); } catch (e) {} return resolve(null); }
+        resp.pipe(ws);
+        ws.on('finish', () => { ws.close(() => { console.log('[RENDER] music downloaded ->', p); resolve(p); }); });
+      });
+      rq.on('error', () => { try { fs.unlinkSync(p); } catch (e) {} resolve(null); });
+      rq.setTimeout(45000, () => { try { rq.destroy(); } catch (e) {} resolve(null); });
+    } catch (e) { resolve(null); }
+  });
+}
+
+app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render request aayi! '+new Date().toISOString(); next(); }, upload.fields([{name:'video',maxCount:1},{name:'overlay',maxCount:1},{name:'music',maxCount:1}]), (req, res) => {
   _lastRenderErr='STEP 0.5: multer ke baad, files='+JSON.stringify(Object.keys(req.files||{}));
   const vf = req.files['video']?.[0]; if (!vf) { _lastRenderErr='STEP 0.6: VIDEO FILE NAHI MILI multer ke baad'; return res.status(400).json({ error: 'No video' }); }
   const of = req.files['overlay']?.[0];
@@ -274,6 +294,8 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
   const out = '/tmp/final_' + Date.now() + '.mp4';
   const { spawn } = require('child_process');
   let _rendered = false;
+  let musicPath = null;
+  let _keepOrig = (req.body.keepOriginal !== '0');
   function doRender() {
     if (_rendered) return; _rendered = true;
     _lastRenderErr='STEP 2: doRender shuru, size='+_vfSize;
@@ -283,16 +305,75 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
     // poori video par rehta hai aur video poori length chalti hai (1 frame nahi).
     const fcOv = '[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[base];[1:v]scale=trunc(iw/2)*2:trunc(ih/2)*2[ov];[base][ov]overlay=0:0:eof_action=repeat:format=auto[outv]';
     const trimArgs = dur > 0.5 ? ['-ss', String(ts), '-i', vf.path, '-t', String(dur)] : ['-i', vf.path];
-    const args = of
-      ? ['-y','-filter_complex_threads','1',...trimArgs,'-i',of.path,'-filter_complex',fcOv,'-map','[outv]','-map','0:a?','-c:v','libx264','-preset','veryfast','-threads','1','-crf','28','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart','-max_muxing_queue_size','1024',out]
-      : ['-y','-filter_threads','1',...trimArgs,'-vf',scaleF,'-c:v','libx264','-preset','veryfast','-threads','1','-crf','28','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart','-max_muxing_queue_size','1024',out];
+
+    // ══════ BACKGROUND MUSIC MIX ══════
+    // keepOrig = video ki asli awaaz rakhni hai ya nahi.
+    // Agar video mein audio track hi na ho to amix fail hota hai — neeche wala
+    // close-handler khud music-only par dobara try kar leta hai.
+    function buildArgs(keepOrig) {
+      if (!musicPath) {
+        return of
+          ? ['-y','-filter_complex_threads','1',...trimArgs,'-i',of.path,'-filter_complex',fcOv,'-map','[outv]','-map','0:a?','-c:v','libx264','-preset','veryfast','-threads','1','-crf','28','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart','-max_muxing_queue_size','1024',out]
+          : ['-y','-filter_threads','1',...trimArgs,'-vf',scaleF,'-c:v','libx264','-preset','veryfast','-threads','1','-crf','28','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart','-max_muxing_queue_size','1024',out];
+      }
+      const mVol    = Math.max(0, Math.min(3,  parseFloat(req.body.musicVol)   || 0.6));
+      const oVol    = Math.max(0, Math.min(3,  parseFloat(req.body.origVol)    || 0));
+      const mStart  = Math.max(0,              parseFloat(req.body.musicStart) || 0);
+      const mEnd    = Math.max(0,              parseFloat(req.body.musicEnd)   || 0);
+      const fadeIn  = Math.max(0, Math.min(20, parseFloat(req.body.fadeIn)     || 0));
+      const fadeOut = Math.max(0, Math.min(20, parseFloat(req.body.fadeOut)    || 0));
+      const segLen  = (mEnd > mStart) ? (mEnd - mStart) : 0;
+      const mixLen  = dur > 0.5 ? dur : segLen;
+      const musIdx  = of ? 2 : 1;
+
+      let bg = '[' + musIdx + ':a]';
+      if (segLen > 0) bg += 'atrim=duration=' + segLen.toFixed(2) + ',asetpts=PTS-STARTPTS,';
+      bg += 'volume=' + mVol.toFixed(3);
+      if (fadeIn > 0) bg += ',afade=t=in:st=0:d=' + fadeIn.toFixed(2);
+      if (fadeOut > 0 && mixLen > fadeOut) bg += ',afade=t=out:st=' + (mixLen - fadeOut).toFixed(2) + ':d=' + fadeOut.toFixed(2);
+      bg += ',apad,atrim=duration=3600[bg]';  // apad = video khatam hone tak khamoshi; atrim cap zaroori
+                                              // warna stream infinite ho jati hai aur muxer buffer bhar ke
+                                              // "No space left on device" error aata hai
+
+      const vChain = of ? fcOv : '[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p[outv]';
+
+      let fc, aMap;
+      if (keepOrig && oVol > 0) {
+        fc = vChain + ';' + bg + ';[0:a]volume=' + oVol.toFixed(3) + '[oa];'
+           + '[oa][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]';
+        aMap = '[outa]';
+      } else {
+        fc = vChain + ';' + bg;
+        aMap = '[bg]';
+      }
+
+      const a = ['-y','-filter_complex_threads','1', ...trimArgs];
+      if (of) a.push('-i', of.path);
+      a.push('-ss', String(mStart), '-i', musicPath);
+      a.push('-filter_complex', fc, '-map', '[outv]', '-map', aMap,
+        '-c:v','libx264','-preset','veryfast','-threads','1','-crf','28','-pix_fmt','yuv420p',
+        '-c:a','aac','-b:a','128k','-ar','44100','-shortest',
+        '-movflags','+faststart','-max_muxing_queue_size','1024', out);
+      return a;
+    }
+
+    const args = buildArgs(_keepOrig);
     const ff = spawn(FFMPEG_BIN, args);
     _lastRenderErr='STEP 3: FFmpeg spawn hua, ARGS='+args.join(' ');
     let err = '';
     ff.stderr.on('data', d => { err += d.toString(); _lastRenderErr='STEP 4: FFmpeg chal raha\n\n'+err.slice(-1500); });
     ff.on('close', code => {
+      // ── Video mein audio track hi nahi tha? Music-only par ek dafa dobara try karo ──
+      if (code !== 0 && musicPath && _keepOrig) {
+        _keepOrig = false;
+        _rendered = false;
+        console.log('[RENDER] amix fail -> music-only retry');
+        _lastRenderErr = 'RETRY: original audio track nahi mila, music-only par dobara koshish';
+        return doRender();
+      }
       fs.unlink(vf.path, ()=>{});
       if (of) fs.unlink(of.path, ()=>{});
+      if (musicPath) fs.unlink(musicPath, ()=>{});
       if (code !== 0) { _lastRenderErr='EXIT '+code+' | size:'+_vfSize+'\n\nARGS: '+args.join(' ')+'\n\n'+err; return res.status(500).json({ error: 'FFmpeg failed', detail: err.slice(-1500) }); }
       res.setHeader('Content-Type','video/mp4');
       const s = fs.createReadStream(out);
@@ -303,7 +384,22 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
     setTimeout(() => { ff.kill('SIGKILL'); if (!res.headersSent) { _lastRenderErr='TIMEOUT 900s | size:'+_vfSize; res.status(500).json({ error: 'Timeout' }); } }, 900000);
   }
   // AUTO-ROTATE: FFmpeg khud rotation metadata padh ke seedha kar leta hai — manual transpose nahi.
-  doRender();
+  // Music multipart mein aayi? warna Bunny URL se download karo, phir render.
+  const mfUp = req.files['music'] && req.files['music'][0];
+  if (mfUp) {
+    musicPath = mfUp.path;
+    console.log('[RENDER] music (upload) =', mfUp.size, 'bytes');
+    doRender();
+  } else if (req.body.musicUrl) {
+    console.log('[RENDER] music URL:', req.body.musicUrl);
+    vjDownloadMusic(req.body.musicUrl).then(p => {
+      musicPath = p;
+      if (!p) console.log('[RENDER] music download FAIL — bina music render');
+      doRender();
+    }).catch(() => doRender());
+  } else {
+    doRender();
+  }
 });
 
 const PORT = process.env.PORT || 3000;
