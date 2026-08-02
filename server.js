@@ -117,6 +117,27 @@ app.post('/api/gemini', jsonParser, async (req, res) => {
   res.status(500).json({ error: 'Gemini failed' });
 });
 
+app.post('/api/embed', jsonParser, async (req, res) => {
+  const text = req.body.text || '';
+  if (!GEMINI_KEY) return res.status(400).json({ error: 'No Gemini key' });
+  if (!text) return res.status(400).json({ error: 'Missing text' });
+  try {
+    const body = JSON.stringify({ content: { parts: [{ text: text.slice(0, 2000) }] } });
+    const r = await new Promise((resolve, reject) => {
+      const req2 = https.request({hostname:'generativelanguage.googleapis.com',path:'/v1beta/models/gemini-embedding-001:embedContent?key='+GEMINI_KEY,method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}},(resp)=>{
+        let d = ''; resp.on('data', c => d += c); resp.on('end', () => resolve(d));
+      });
+      req2.on('error', reject); req2.write(body); req2.end();
+    });
+    const parsed = JSON.parse(r);
+    const embedding = parsed && parsed.embedding && parsed.embedding.values ? parsed.embedding.values : null;
+    if (!embedding) return res.status(500).json({ error: 'No embedding returned' });
+    res.json({ embedding });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/bunny-list', (req, res) => {
   if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
   const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/',method:'GET',headers:{'AccessKey':BUNNY_KEY,'Accept':'application/json'}},(resp)=>{let d='';resp.on('data',c=>d+=c);resp.on('end',()=>{try{res.json(JSON.parse(d));}catch(e){res.status(500).json({error:'Parse error'})}});});
