@@ -17,6 +17,10 @@ const BUNNY_HOST = process.env.BUNNY_HOST || 'storage.bunnycdn.com';
 const BUNNY_ZONE = process.env.BUNNY_ZONE || '';
 const BUNNY_PULLZONE = (process.env.BUNNY_PULLZONE || '').replace(/\/$/,'');
 const GEMINI_KEY = process.env.GEMINI_KEY || '';
+const FIREBASE_KEY = process.env.FIREBASE_KEY || '';
+const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL || '';
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || '';
+const FIREBASE_APP_ID = process.env.FIREBASE_APP_ID || '';
 
 let FFMPEG_BIN = 'ffmpeg';
 try { const s = require('ffmpeg-static'); if (s) FFMPEG_BIN = s; } catch(e) {}
@@ -56,7 +60,11 @@ function saveShareCountsDebounced(){
 
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, bunnyHost: BUNNY_HOST, gemini: !!GEMINI_KEY }));
-app.get('/api/config', (req, res) => res.json({ pullzone: BUNNY_PULLZONE, hasBunny: !!BUNNY_KEY, hasGemini: !!GEMINI_KEY }));
+app.get('/api/config', (req, res) => res.json({
+  pullzone: BUNNY_PULLZONE, hasBunny: !!BUNNY_KEY, hasGemini: !!GEMINI_KEY,
+  hasFirebase: !!(FIREBASE_KEY && FIREBASE_DB_URL),
+  fbApiKey: FIREBASE_KEY, fbDbUrl: FIREBASE_DB_URL, fbProjectId: FIREBASE_PROJECT_ID, fbAppId: FIREBASE_APP_ID
+}));
 
 app.get('/api/proxy-fetch', (req, res) => {
   const target = req.query.url;
