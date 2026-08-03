@@ -58,6 +58,18 @@ app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, bunnyHost: BUNNY_HOST, gemini: !!GEMINI_KEY }));
 app.get('/api/config', (req, res) => res.json({ pullzone: BUNNY_PULLZONE, hasBunny: !!BUNNY_KEY, hasGemini: !!GEMINI_KEY }));
 
+app.get('/api/proxy-fetch', (req, res) => {
+  const target = req.query.url;
+  if (!target || !/^https:\/\/[a-zA-Z0-9.-]*\.(b-cdn\.net|bunnycdn\.com)\//i.test(target)) {
+    return res.status(400).json({ error: 'Invalid or disallowed URL' });
+  }
+  https.get(target, (resp) => {
+    if (resp.statusCode >= 400) { res.status(resp.statusCode).end(); return; }
+    res.setHeader('Content-Type', resp.headers['content-type'] || 'application/json');
+    resp.pipe(res);
+  }).on('error', e => res.status(500).json({ error: e.message }));
+});
+
 app.post('/api/mark-shared', jsonParser, (req, res) => {
   const videoURL = req.body && req.body.videoURL;
   if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
