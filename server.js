@@ -286,6 +286,73 @@ app.delete('/api/bunny-delete', (req, res) => {
   r.on('error',e=>res.status(500).json({error:e.message})); r.end();
 });
 
+// ── ONE-TIME MIGRATION: 'ws_biz-v5b5j6__' prefix wali files ko bina-prefix
+// naam par copy kar ke purani (prefix wali) delete kar deta hai. Sirf ek
+// dafa use karne ke liye — kaam ho jaye to ye poora route hata dena. ──
+app.get('/api/migrate-legacy-prefix', async (req, res) => {
+  if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
+  const PREFIX = 'ws_biz-v5b5j6__';
+  const results = [];
+
+  function bunnyList() {
+    return new Promise((resolve, reject) => {
+      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/',method:'GET',headers:{'AccessKey':BUNNY_KEY,'Accept':'application/json'}},(resp)=>{
+        let d=''; resp.on('data',c=>d+=c); resp.on('end',()=>{ try{ resolve(JSON.parse(d)); }catch(e){ reject(e); } });
+      });
+      r.on('error',reject); r.end();
+    });
+  }
+  function bunnyGetRaw(filename) {
+    return new Promise((resolve) => {
+      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'GET',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
+        if (resp.statusCode >= 400) return resolve(null);
+        const chunks=[]; resp.on('data',c=>chunks.push(c)); resp.on('end',()=>resolve(Buffer.concat(chunks)));
+      });
+      r.on('error',()=>resolve(null)); r.end();
+    });
+  }
+  function bunnyPutRaw(filename, buf) {
+    return new Promise((resolve) => {
+      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'PUT',headers:{'AccessKey':BUNNY_KEY,'Content-Type':'application/octet-stream','Content-Length':buf.length}},(resp)=>{
+        resp.on('data',()=>{}); resp.on('end',()=>resolve(resp.statusCode<300));
+      });
+      r.on('error',()=>resolve(false)); r.write(buf); r.end();
+    });
+  }
+  function bunnyDeleteRaw(filename) {
+    return new Promise((resolve) => {
+      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'DELETE',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
+        resp.on('data',()=>{}); resp.on('end',()=>resolve(resp.statusCode<300));
+      });
+      r.on('error',()=>resolve(false)); r.end();
+    });
+  }
+
+  try {
+    const files = await bunnyList();
+    const targets = (files || []).filter(f => f.ObjectName && f.ObjectName.indexOf(PREFIX) === 0 && !f.IsDirectory);
+    console.log('[MIGRATE] found ' + targets.length + ' files with prefix ' + PREFIX);
+    for (const f of targets) {
+      const oldName = f.ObjectName;
+      const newName = oldName.slice(PREFIX.length);
+      try {
+        const buf = await bunnyGetRaw(oldName);
+        if (!buf) { results.push({ oldName, status: 'download-failed' }); continue; }
+        const putOk = await bunnyPutRaw(newName, buf);
+        if (!putOk) { results.push({ oldName, status: 'upload-failed' }); continue; }
+        const delOk = await bunnyDeleteRaw(oldName);
+        results.push({ oldName, newName, status: delOk ? 'ok' : 'copied-but-old-not-deleted' });
+        console.log('[MIGRATE] ' + oldName + ' -> ' + newName + ' : ' + (delOk ? 'ok' : 'copy-only'));
+      } catch (e) {
+        results.push({ oldName, status: 'error', error: e.message });
+      }
+    }
+    res.json({ total: targets.length, results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/bunny-billing', (req, res) => {
   const key = req.query.key;
   if (!key) return res.status(400).json({ error: 'No account key' });
