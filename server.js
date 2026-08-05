@@ -107,14 +107,21 @@ app.post('/api/gemini', jsonParser, async (req, res) => {
   const prompt = req.body.prompt || '';
   if (!prompt) { console.log('[GEMINI] FAIL: No prompt in request body'); return res.status(400).json({ error: 'No prompt' }); }
   const maxTok = parseInt(req.body.maxTokens) || 8192;
-  console.log('[GEMINI] Request received, promptLen=' + prompt.length + ', maxTokens=' + maxTok);
+  // FIX (NEW — AI topic guess): agar client image bhi bhejta hai, usay bhi
+  // prompt ke saath Gemini ko dikhao (vision).
+  const _imgB64 = req.body.imageBase64 || null;
+  const _imgMime = req.body.imageMime || 'image/jpeg';
+  console.log('[GEMINI] Request received, promptLen=' + prompt.length + ', maxTokens=' + maxTok + (_imgB64?', with image':''));
   // FIX: gemini-2.5-flash by default "thinking" (internal reasoning) tokens bhi
   // maxOutputTokens budget mein se hi kaatta hai — isi wajah se poora budget
   // sochne mein khatam ho jata tha aur asli visible caption sirf 100-200 chars
   // ka reh jata tha (chahe HTTP 200 SUCCESS ho). thinkingBudget:0 se yeh
   // internal reasoning bilkul band ho jati hai, taake poora token budget sirf
   // asli caption text banane mein use ho.
-  const body = JSON.stringify({ contents:[{parts:[{text:prompt}]}], generationConfig:{temperature:0.9,maxOutputTokens:maxTok,thinkingConfig:{thinkingBudget:0}} });
+  const _parts = _imgB64
+    ? [{ text: prompt }, { inline_data: { mime_type: _imgMime, data: _imgB64 } }]
+    : [{ text: prompt }];
+  const body = JSON.stringify({ contents:[{parts:_parts}], generationConfig:{temperature:0.9,maxOutputTokens:maxTok,thinkingConfig:{thinkingBudget:0}} });
   const models = ['gemini-2.5-flash','gemini-2.5-flash-preview-04-17'];
   for (const m of models) {
     try {
@@ -388,7 +395,43 @@ function vjDownloadMusic(url) {
   });
 }
 
-app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render request aayi! '+new Date().toISOString(); next(); }, upload.fields([{name:'video',maxCount:1},{name:'overlay',maxCount:1},{name:'music',maxCount:1}]), (req, res) => {
+// FIX (NEW — Auto-Trim Silence): video ke SHURU aur AAKHIR mein khamoshi
+// khud detect karo aur user ke manual trim ke upar additional trim laga do.
+// Sirf shuru/aakhir (boundary) trim hoti hai, beech mein kabhi nahi —
+// isliye result kabhi ajeeb/broken nahi lagta. Max 2.5 second har taraf
+// (safety cap) — koi accidental over-trim nahi.
+function detectLeadTrailSilence(filePath) {
+  return new Promise((resolve) => {
+    try {
+      const { spawn: _spawn } = require('child_process');
+      const args = ['-i', filePath, '-af', 'silencedetect=noise=-35dB:d=0.3', '-f', 'null', '-'];
+      const ff = _spawn(FFMPEG_BIN, args);
+      let err = '';
+      ff.stderr.on('data', d => { err += d.toString(); });
+      ff.on('close', () => {
+        try {
+          const starts = [...err.matchAll(/silence_start:\s*([\d.]+)/g)].map(m => parseFloat(m[1]));
+          const ends = [...err.matchAll(/silence_end:\s*([\d.]+)/g)].map(m => parseFloat(m[1]));
+          const durMatch = err.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+          let totalDur = 0;
+          if (durMatch) totalDur = (+durMatch[1]) * 3600 + (+durMatch[2]) * 60 + parseFloat(durMatch[3]);
+          let leadSilence = 0, trailSilence = 0;
+          if (starts.length && starts[0] < 0.15 && ends.length) leadSilence = ends[0];
+          if (starts.length && totalDur > 0) {
+            const lastStart = starts[starts.length - 1];
+            if (lastStart != null && (totalDur - lastStart) < 5 && ends.length < starts.length) {
+              trailSilence = totalDur - lastStart;
+            }
+          }
+          resolve({ leadSilence: Math.min(leadSilence, 2.5), trailSilence: Math.min(trailSilence, 2.5), totalDur });
+        } catch (e) { resolve({ leadSilence: 0, trailSilence: 0, totalDur: 0 }); }
+      });
+      ff.on('error', () => resolve({ leadSilence: 0, trailSilence: 0, totalDur: 0 }));
+    } catch (e) { resolve({ leadSilence: 0, trailSilence: 0, totalDur: 0 }); }
+  });
+}
+
+app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render request aayi! '+new Date().toISOString(); next(); }, upload.fields([{name:'video',maxCount:1},{name:'overlay',maxCount:1},{name:'music',maxCount:1}]), async (req, res) => {
   _lastRenderErr='STEP 0.5: multer ke baad, files='+JSON.stringify(Object.keys(req.files||{}));
   const vf = req.files['video']?.[0]; if (!vf) { _lastRenderErr='STEP 0.6: VIDEO FILE NAHI MILI multer ke baad'; return res.status(400).json({ error: 'No video' }); }
   const of = req.files['overlay']?.[0];
@@ -396,8 +439,19 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
   try{ _vfSize=fs.statSync(vf.path).size; }catch(e){}
   console.log('VIDEO received size:', _vfSize);
   _lastRenderErr='STEP 1: video mila, size='+_vfSize+' bytes, overlay='+(of?'haan':'nahi');
-  const ts = Math.max(0, parseFloat(req.body.trimStart)||0);
-  const te = parseFloat(req.body.trimEnd)||0;
+  let ts = Math.max(0, parseFloat(req.body.trimStart)||0);
+  let te = parseFloat(req.body.trimEnd)||0;
+  if (req.body.autoTrimSilence !== '0') {
+    try {
+      const sil = await detectLeadTrailSilence(vf.path);
+      if (sil.leadSilence > 0.15) { ts += sil.leadSilence; console.log('[AUTOTRIM] lead silence trimmed:', sil.leadSilence.toFixed(2)+'s'); }
+      if (sil.trailSilence > 0.15 && sil.totalDur > 0) {
+        const naturalEnd = (te > ts) ? te : sil.totalDur;
+        te = Math.max(ts + 0.5, naturalEnd - sil.trailSilence);
+        console.log('[AUTOTRIM] trail silence trimmed:', sil.trailSilence.toFixed(2)+'s');
+      }
+    } catch (e) {}
+  }
   const dur = te > ts ? te - ts : 0;
   const out = '/tmp/final_' + Date.now() + '.mp4';
   const { spawn } = require('child_process');
