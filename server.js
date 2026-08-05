@@ -447,8 +447,21 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
 
       let fc, aMap;
       if (keepOrig && oVol > 0) {
+        // FIX (NEW — smart auto-ducking): pehle music hamesha fixed volume par
+        // rehta tha, chahe video ki apni awaaz bol rahi ho ya khamoshi ho —
+        // isi wajah se awaaz aur music aapas mein takrate the. Ab
+        // sidechaincompress filter original awaaz (oa) ko "detector" bana kar
+        // music (bg) ka volume real-time mein khud control karta hai: jab
+        // awaaz bole, music khud halka ho jata hai; jab awaaz ruke/khamosh
+        // ho, music khud wapas upar aa jata hai. Podcasts/YouTube mein isi
+        // technique ko "ducking" kehte hain.
+        // threshold=0.04 (~-28dB) — halki si bhi awaaz duck trigger kar de
+        // ratio=10 — mazboot ducking taake awaaz hamesha saaf sunaayi de
+        // attack=8ms — awaaz shuru hote hi turant music halka ho jaye
+        // release=350ms — awaaz rukte hi thodi si smooth der se music upar aaye (achanak jhatka na lage)
         fc = vChain + ';' + bg + ';[0:a]volume=' + oVol.toFixed(3) + '[oa];'
-           + '[oa][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]';
+           + '[bg][oa]sidechaincompress=threshold=0.04:ratio=10:attack=8:release=350:makeup=1[duckedbg];'
+           + '[oa][duckedbg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]';
         aMap = '[outa]';
       } else {
         fc = vChain + ';' + bg;
