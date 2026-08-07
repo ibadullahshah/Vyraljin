@@ -513,8 +513,18 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
         // ratio=10 — mazboot ducking taake awaaz hamesha saaf sunaayi de
         // attack=8ms — awaaz shuru hote hi turant music halka ho jaye
         // release=350ms — awaaz rukte hi thodi si smooth der se music upar aaye (achanak jhatka na lage)
-        fc = vChain + ';' + bg + ';[0:a]volume=' + oVol.toFixed(3) + '[oa];'
-           + '[bg][oa]sidechaincompress=threshold=0.04:ratio=10:attack=8:release=350:makeup=1[duckedbg];'
+        // FIX (ROOT CAUSE — final video mein sirf music, original sound gayab):
+        // video ki apni audio aur music file ki sample-rate/channel-layout
+        // aksar match nahi karte the, jis wajah se sidechaincompress/amix
+        // FFmpeg mein fail ho jata tha aur code khamoshi se music-only retry
+        // kar leta tha (neeche wala close-handler). Ab dono streams ko
+        // sidechain/amix se PEHLE ek common format (44100Hz stereo) mein
+        // normalize karte hain — isse yeh mismatch-failure khatam ho jati hai
+        // aur original awaaz hamesha final video mein bhi bachi rehti hai,
+        // bilkul preview jaisa.
+        fc = vChain + ';' + bg + ';[0:a]volume=' + oVol.toFixed(3) + ',aformat=sample_rates=44100:channel_layouts=stereo[oa];'
+           + '[bg]aformat=sample_rates=44100:channel_layouts=stereo[bgf];'
+           + '[bgf][oa]sidechaincompress=threshold=0.04:ratio=10:attack=8:release=350:makeup=1[duckedbg];'
            + '[oa][duckedbg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]';
         aMap = '[outa]';
       } else {
@@ -542,8 +552,10 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
       if (code !== 0 && musicPath && _keepOrig) {
         _keepOrig = false;
         _rendered = false;
-        console.log('[RENDER] amix fail -> music-only retry');
-        _lastRenderErr = 'RETRY: original audio track nahi mila, music-only par dobara koshish';
+        console.log('[RENDER] ducking/amix fail -> music-only retry. ORIGINAL ERROR:', err.slice(-800));
+        // FIX: asal error ab retry ke overwrite se pehle safe kar lete hain,
+        // taake /api/lasterror par pata chal sake ke ducking kyun fail hui thi
+        _lastRenderErr = 'PRIMARY (with-original-audio) ATTEMPT FAILED, retrying music-only.\n\nORIGINAL ERROR:\n' + err.slice(-1200) + '\n\n---RETRY BELOW---';
         return doRender();
       }
       fs.unlink(vf.path, ()=>{});
