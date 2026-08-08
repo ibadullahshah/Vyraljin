@@ -472,7 +472,12 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
     // Overlay PNG ko video ke har frame par overlay karo. eof_action=repeat se overlay
     // poori video par rehta hai aur video poori length chalti hai (1 frame nahi).
     const fcOv = '[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[base];[1:v]scale=trunc(iw/2)*2:trunc(ih/2)*2[ov];[base][ov]overlay=0:0:eof_action=repeat:format=auto[outv]';
-    const trimArgs = dur > 0.05 ? ['-ss', String(ts), '-i', vf.path, '-t', String(dur)] : ['-i', vf.path];
+    // FIX (ROOT CAUSE — cut/trim bilkul apply nahi ho raha tha): -t flag
+    // -i ke BAAD tha, jo FFmpeg mein sirf agle input par ya output par
+    // attach ho jata hai — us wajah se video ki poori length render hoti
+    // thi trim ke bawajood. Ab -t, -ss ke sath -i se PEHLE hai (input option),
+    // taake sirf vf.path input hi trim ho.
+    const trimArgs = dur > 0.05 ? ['-ss', String(ts), '-t', String(dur), '-i', vf.path] : ['-i', vf.path];
 
     // ══════ BACKGROUND MUSIC MIX ══════
     // keepOrig = video ki asli awaaz rakhni hai ya nahi.
@@ -563,6 +568,10 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
         // FIX: asal error ab retry ke overwrite se pehle safe kar lete hain,
         // taake /api/lasterror par pata chal sake ke ducking kyun fail hui thi
         _lastRenderErr = 'PRIMARY (with-original-audio) ATTEMPT FAILED, retrying music-only.\n\nORIGINAL ERROR:\n' + err.slice(-1200) + '\n\n---RETRY BELOW---';
+        // FIX (NEW): ye ab PARAMS wale permanent variable mein bhi save hota
+        // hai, taake retry ka STEP 4 progress ise overwrite na kar sake aur
+        // /api/lasterror par DUCKING fail hone ki asal wajah hamesha dikhe.
+        _lastRenderParams += '\n\n!!! DUCKING FAILED, YE RAHI ASAL WAJAH !!!\n' + err.slice(-1200);
         return doRender();
       }
       fs.unlink(vf.path, ()=>{});
