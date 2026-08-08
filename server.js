@@ -453,6 +453,7 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
     } catch (e) {}
   }
   const dur = te > ts ? te - ts : 0;
+  _lastRenderErr='STEP 1.5: TRIM DEBUG ts='+ts+' te='+te+' dur='+dur+' body.trimStart='+req.body.trimStart+' body.trimEnd='+req.body.trimEnd;
   const out = '/tmp/final_' + Date.now() + '.mp4';
   const { spawn } = require('child_process');
   let _rendered = false;
@@ -466,7 +467,7 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
     // Overlay PNG ko video ke har frame par overlay karo. eof_action=repeat se overlay
     // poori video par rehta hai aur video poori length chalti hai (1 frame nahi).
     const fcOv = '[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[base];[1:v]scale=trunc(iw/2)*2:trunc(ih/2)*2[ov];[base][ov]overlay=0:0:eof_action=repeat:format=auto[outv]';
-    const trimArgs = dur > 0.5 ? ['-ss', String(ts), '-i', vf.path, '-t', String(dur)] : ['-i', vf.path];
+    const trimArgs = dur > 0.05 ? ['-ss', String(ts), '-i', vf.path, '-t', String(dur)] : ['-i', vf.path];
 
     // ══════ BACKGROUND MUSIC MIX ══════
     // keepOrig = video ki asli awaaz rakhni hai ya nahi.
