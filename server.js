@@ -479,7 +479,7 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
           : ['-y','-filter_threads','1',...trimArgs,'-vf',scaleF,'-c:v','libx264','-preset','veryfast','-threads','1','-crf','28','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart','-max_muxing_queue_size','1024',out];
       }
       const mVol    = Math.max(0, Math.min(3,  parseFloat(req.body.musicVol)   || 0.6));
-      const oVol    = Math.max(0, Math.min(3,  parseFloat(req.body.origVol)    || 0));
+      const oVol    = Math.max(0, Math.min(3,  (req.body.origVol !== undefined && req.body.origVol !== '') ? parseFloat(req.body.origVol) : 1));
       const mStart  = Math.max(0,              parseFloat(req.body.musicStart) || 0);
       const mEnd    = Math.max(0,              parseFloat(req.body.musicEnd)   || 0);
       const fadeIn  = Math.max(0, Math.min(20, parseFloat(req.body.fadeIn)     || 0));
