@@ -91,7 +91,8 @@ app.get('/api/share-counts', (req, res) => {
 });
 
 let _lastRenderErr='(abhi koi error nahi)';
-app.get('/api/lasterror',(req,res)=>res.type('text/plain').send(_lastRenderErr));
+let _lastRenderParams='(abhi koi render nahi)';
+app.get('/api/lasterror',(req,res)=>res.type('text/plain').send('===PARAMS (permanent, overwrite nahi hote)===\n'+_lastRenderParams+'\n\n===LIVE STATUS===\n'+_lastRenderErr));
 // 🔬 TEST: sirf video receive karo, render NAHI — pata karne ke liye upload pohanchti hai ya nahi
 app.post('/api/uptest', upload.fields([{name:'video',maxCount:1}]), (req,res)=>{
   const vf=req.files['video']?.[0];
@@ -439,6 +440,10 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
   try{ _vfSize=fs.statSync(vf.path).size; }catch(e){}
   console.log('VIDEO received size:', _vfSize);
   _lastRenderErr='STEP 1: video mila, size='+_vfSize+' bytes, overlay='+(of?'haan':'nahi');
+  _lastRenderParams = 'RAW BODY: trimStart='+req.body.trimStart+' trimEnd='+req.body.trimEnd
+    +' | origVol='+req.body.origVol+' keepOriginal='+req.body.keepOriginal
+    +' | musicVol='+req.body.musicVol+' musicUrl='+(req.body.musicUrl?'HAAN':'NAHI')
+    +' | time='+new Date().toISOString();
   let ts = Math.max(0, parseFloat(req.body.trimStart)||0);
   let te = parseFloat(req.body.trimEnd)||0;
   if (req.body.autoTrimSilence !== '0') {
@@ -500,6 +505,7 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
 
       const vChain = of ? fcOv : '[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p[outv]';
 
+      _lastRenderParams += ' | COMPUTED: ts='+ts+' te='+te+' dur='+dur+' oVol='+oVol+' mVol='+mVol+' keepOrig='+keepOrig+' -> BRANCH='+((keepOrig && oVol > 0)?'DUCKING(original+music dono)':'MUSIC-ONLY(original gayab)');
       let fc, aMap;
       if (keepOrig && oVol > 0) {
         // FIX (NEW — smart auto-ducking): pehle music hamesha fixed volume par
