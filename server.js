@@ -460,10 +460,23 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
   const dur = te > ts ? te - ts : 0;
   _lastRenderErr='STEP 1.5: TRIM DEBUG ts='+ts+' te='+te+' dur='+dur+' body.trimStart='+req.body.trimStart+' body.trimEnd='+req.body.trimEnd;
   const out = '/tmp/final_' + Date.now() + '.mp4';
-  const { spawn } = require('child_process');
+  const { spawn, execFile } = require('child_process');
   let _rendered = false;
   let musicPath = null;
   let _keepOrig = (req.body.keepOriginal !== '0');
+  // FIX (NEW — audio-detection): check karo ke uploaded video mein
+  // audio stream MAUJOOD hai ya nahi, taake PARAMS mein saaf pata chale
+  // ke "original awaaz nahi aati" ka masla SOURCE video mein hai ya kahin aur.
+  let _vfHasAudio = null;
+  try {
+    _vfHasAudio = await new Promise((resolve) => {
+      execFile(FFMPEG_BIN, ['-i', vf.path], (err, stdout, stderr) => {
+        const s = (stderr || '') + (stdout || '');
+        resolve(/Stream #\d+:\d+.*Audio/i.test(s));
+      });
+    });
+  } catch (e) { _vfHasAudio = null; }
+  _lastRenderParams += ' | VIDEO_HAS_AUDIO=' + _vfHasAudio;
   function doRender() {
     if (_rendered) return; _rendered = true;
     _lastRenderErr='STEP 2: doRender shuru, size='+_vfSize;
