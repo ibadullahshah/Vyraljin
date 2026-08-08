@@ -547,10 +547,18 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
         // normalize karte hain — isse yeh mismatch-failure khatam ho jati hai
         // aur original awaaz hamesha final video mein bhi bachi rehti hai,
         // bilkul preview jaisa.
-        fc = vChain + ';' + bg + ';[0:a]volume=' + oVol.toFixed(3) + ',aformat=sample_rates=44100:channel_layouts=stereo[oa];'
+        // FIX (ROOT CAUSE — asal wajah, confirm shuda): [oa] label do jagah
+        // (sidechaincompress aur amix) use ho raha tha. FFmpeg mein ek filter
+        // output label sirf EK dafa aage kisi filter ko diya ja sakta hai —
+        // dusri dafa use karne par wo resolve nahi hota aur FFmpeg use
+        // stream-specifier samajh kar "Invalid stream specifier: oa" error
+        // deta hai (isi wajah se ducking hamesha fail ho rahi thi aur
+        // music-only fallback chal raha tha). Fix: asplit se [oa] ki 2
+        // alag copies bana do — ek detector ke liye, ek final mix ke liye.
+        fc = vChain + ';' + bg + ';[0:a]volume=' + oVol.toFixed(3) + ',aformat=sample_rates=44100:channel_layouts=stereo,asplit=2[oa1][oa2];'
            + '[bg]aformat=sample_rates=44100:channel_layouts=stereo[bgf];'
-           + '[bgf][oa]sidechaincompress=threshold=0.04:ratio=10:attack=8:release=350:makeup=1[duckedbg];'
-           + '[oa][duckedbg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]';
+           + '[bgf][oa1]sidechaincompress=threshold=0.04:ratio=10:attack=8:release=350:makeup=1[duckedbg];'
+           + '[oa2][duckedbg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]';
         aMap = '[outa]';
       } else {
         fc = vChain + ';' + bg;
