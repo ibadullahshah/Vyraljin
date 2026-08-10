@@ -58,6 +58,20 @@ function saveShareCountsDebounced(){
   _scSaveTimer = setTimeout(()=>{ bunnyPutJSON(SHARECOUNTS_FILE, shareCounts).catch(()=>{}); }, 3000);
 }
 
+// ══════ TRASH-THRESHOLD SYNC — cross-device (VyralJin) ══════
+// Jab kisi bhi device par ek post 3 platforms (ya total platforms) par share
+// ho jaye, uska waqt yahan record hota hai — taake HAR device is post ko
+// isi ek waqt se 20 min baad Trash mein bheje, na ke apne-apne alag waqt se.
+let trashThresholds = {};
+const TRASHTHRESH_FILE = 'vj_trash_thresholds.json';
+let _ttSaveTimer = null;
+bunnyGetJSON(TRASHTHRESH_FILE).then(data=>{ if(data && typeof data==='object') trashThresholds = data; }).catch(()=>{});
+
+function saveTrashThresholdsDebounced(){
+  if(_ttSaveTimer) clearTimeout(_ttSaveTimer);
+  _ttSaveTimer = setTimeout(()=>{ bunnyPutJSON(TRASHTHRESH_FILE, trashThresholds).catch(()=>{}); }, 3000);
+}
+
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, bunnyHost: BUNNY_HOST, gemini: !!GEMINI_KEY }));
 app.get('/api/config', (req, res) => res.json({
@@ -88,6 +102,25 @@ app.post('/api/mark-shared', jsonParser, (req, res) => {
 
 app.get('/api/share-counts', (req, res) => {
   res.json(shareCounts);
+});
+
+// POST /api/mark-trash-threshold — { videoURL, ts }
+// FIX: sirf PEHLI dafa hi timestamp set hota hai (agar pehle se maujood ho
+// to ignore) — taake jo bhi device sabse pehle threshold cross kare, uska
+// waqt "official" ban jaye aur baaki sab devices isi ek waqt se 20-min
+// count karein, apne-apne alag waqt se nahi.
+app.post('/api/mark-trash-threshold', jsonParser, (req, res) => {
+  const videoURL = req.body && req.body.videoURL;
+  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
+  if (!trashThresholds[videoURL]) {
+    trashThresholds[videoURL] = (req.body && req.body.ts) || Date.now();
+    saveTrashThresholdsDebounced();
+  }
+  res.json({ ok: true, ts: trashThresholds[videoURL] });
+});
+
+app.get('/api/trash-thresholds', (req, res) => {
+  res.json(trashThresholds);
 });
 
 let _lastRenderErr='(abhi koi error nahi)';
