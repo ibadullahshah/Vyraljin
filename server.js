@@ -72,6 +72,16 @@ function saveTrashThresholdsDebounced(){
   _ttSaveTimer = setTimeout(()=>{ bunnyPutJSON(TRASHTHRESH_FILE, trashThresholds).catch(()=>{}); }, 3000);
 }
 
+let trashedPosts = {};
+const TRASHEDPOSTS_FILE = 'vj_trashed_posts.json';
+let _tpSaveTimer = null;
+bunnyGetJSON(TRASHEDPOSTS_FILE).then(data=>{ if(data && typeof data==='object') trashedPosts = data; }).catch(()=>{});
+
+function saveTrashedPostsDebounced(){
+  if(_tpSaveTimer) clearTimeout(_tpSaveTimer);
+  _tpSaveTimer = setTimeout(()=>{ bunnyPutJSON(TRASHEDPOSTS_FILE, trashedPosts).catch(()=>{}); }, 3000);
+}
+
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, bunnyHost: BUNNY_HOST, gemini: !!GEMINI_KEY }));
 app.get('/api/config', (req, res) => res.json({
@@ -121,6 +131,26 @@ app.post('/api/mark-trash-threshold', jsonParser, (req, res) => {
 
 app.get('/api/trash-thresholds', (req, res) => {
   res.json(trashThresholds);
+});
+
+app.post('/api/mark-trashed', jsonParser, (req, res) => {
+  const videoURL = req.body && req.body.videoURL;
+  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
+  trashedPosts[videoURL] = { ts: (req.body && req.body.ts) || Date.now() };
+  saveTrashedPostsDebounced();
+  res.json({ ok: true });
+});
+
+app.post('/api/unmark-trashed', jsonParser, (req, res) => {
+  const videoURL = req.body && req.body.videoURL;
+  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
+  delete trashedPosts[videoURL];
+  saveTrashedPostsDebounced();
+  res.json({ ok: true });
+});
+
+app.get('/api/trashed-posts', (req, res) => {
+  res.json(trashedPosts);
 });
 
 let _lastRenderErr='(abhi koi error nahi)';
