@@ -689,5 +689,55 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
   }
 });
 
+// FIX (NEW — jaisa maanga gaya): "Video would not load" fix — jab koi
+// video ka format/codec (jaise HEVC/H.265, VP9, ya koi khaas phone-specific
+// encoding) kisi doosre phone ke WebView mein decode nahi ho pata, isay
+// yahan bhej kar universal H.264/AAC MP4 mein convert kar dete hain — jo
+// HAR Android WebView reliably khol sakta hai. Koi trim/overlay/music
+// nahi — sirf format-normalize, is liye render se kaafi tez aur halka hai.
+app.post('/api/transcode', upload.fields([{name:'video',maxCount:1}]), async (req, res) => {
+  const vf = req.files && req.files['video'] && req.files['video'][0];
+  if (!vf) return res.status(400).json({ error: 'No video' });
+  let _vfSize = 0;
+  try { _vfSize = fs.statSync(vf.path).size; } catch (e) {}
+  console.log('[TRANSCODE] received size:', _vfSize);
+
+  const out = '/tmp/transcoded_' + Date.now() + '.mp4';
+  const { spawn } = require('child_process');
+  // ── Sirf format-normalize karo: original resolution/orientation waisi
+  // hi rehti hai (FFmpeg khud rotation-metadata sidha kar leta hai), sirf
+  // codec ko universally-compatible H.264/AAC mein badal dete hain. ──
+  const args = [
+    '-y', '-i', vf.path,
+    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+    '-movflags', '+faststart',
+    '-max_muxing_queue_size', '1024',
+    out
+  ];
+  const ff = spawn(FFMPEG_BIN, args);
+  let err = '';
+  ff.stderr.on('data', d => { err += d.toString(); });
+  ff.on('close', code => {
+    fs.unlink(vf.path, () => {});
+    if (code !== 0) {
+      console.log('[TRANSCODE] FFmpeg failed:', err.slice(-800));
+      return res.status(500).json({ error: 'Transcode failed', detail: err.slice(-800) });
+    }
+    res.setHeader('Content-Type', 'video/mp4');
+    const s = fs.createReadStream(out);
+    s.pipe(res);
+    s.on('end', () => fs.unlink(out, () => {}));
+    s.on('error', () => fs.unlink(out, () => {}));
+  });
+  // Format-normalize hamesha render se halka/tez hota hai — 5 minute kaafi hai
+  setTimeout(() => {
+    ff.kill('SIGKILL');
+    if (!res.headersSent) res.status(500).json({ error: 'Transcode timeout' });
+  }, 300000);
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('VyralJin Server v7.0-noscale on port ' + PORT));
