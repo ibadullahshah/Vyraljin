@@ -707,9 +707,19 @@ app.post('/api/transcode', upload.fields([{name:'video',maxCount:1}]), async (re
   // ── Sirf format-normalize karo: original resolution/orientation waisi
   // hi rehti hai (FFmpeg khud rotation-metadata sidha kar leta hai), sirf
   // codec ko universally-compatible H.264/AAC mein badal dete hain. ──
+  // FIX (ROOT CAUSE — jaisa maanga gaya, "Gallery mein chalti hai app mein
+  // nahi"): confirm ho gaya ke aise videos (jaise Snapchat exports)
+  // "17 FPS" jaisi GHAIR-MUSTAQIL (variable) frame-rate ke sath bani hoti
+  // hain — Android Gallery ka lenient player ise chala leta hai, lekin
+  // WebView ka video-decoder aksar aise VFR content ko decode nahi kar
+  // pata. Pehle transcode bhi output ka frame-rate explicitly set nahi
+  // karta tha, is liye wapas ajeeb/VFR timing bana deta tha. Ab -r 30
+  // aur -vsync cfr (constant frame-rate) se hamesha ek saaf, standard
+  // 30fps output banta hai — jo har WebView reliably chala sake.
   const args = [
     '-y', '-i', vf.path,
     '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p',
+    '-r', '30', '-vsync', 'cfr',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
     '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
