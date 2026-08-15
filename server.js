@@ -749,5 +749,74 @@ app.post('/api/transcode', upload.fields([{name:'video',maxCount:1}]), async (re
   }, 300000);
 });
 
+// ══════ AUTOMATIC ERROR REPORTING — jaisa maanga gaya ══════
+// App mein kisi bhi user ke liye (chahe staff ho ya manager) agar koi
+// genuine JS crash/error ho, wo yahan khud-ba-khud record ho jata hai —
+// bina kisi ke bataye. Railway ke "Deploy Logs" mein LIVE dikhta hai,
+// aur Bunny par bhi ek rolling history file mein save hota hai (last 300),
+// taake purane errors baad mein bhi review ho sakein.
+let errorReports = [];
+const ERRORREPORTS_FILE = 'vj_error_reports.json';
+let _erSaveTimer = null;
+bunnyGetJSON(ERRORREPORTS_FILE).then(data => { if (Array.isArray(data)) errorReports = data; }).catch(() => {});
+
+function saveErrorReportsDebounced() {
+  if (_erSaveTimer) clearTimeout(_erSaveTimer);
+  _erSaveTimer = setTimeout(() => { bunnyPutJSON(ERRORREPORTS_FILE, errorReports).catch(() => {}); }, 3000);
+}
+
+app.post('/api/report-error', jsonParser, (req, res) => {
+  try {
+    const b = req.body || {};
+    const kind = b.kind === 'diag' ? 'diag' : 'error';
+    let entry;
+    if (kind === 'diag') {
+      // FIX (NEW — jaisa maanga gaya): VJDiag ke rich checkpoint-level
+      // reports (step/postKey/status/detail) — poori tafseel (file,
+      // method, variable, actual, reason, rootCause) samet.
+      entry = {
+        ts: Date.now(),
+        when: new Date().toISOString(),
+        kind: 'diag',
+        step: String(b.step || '').slice(0, 100),
+        postKey: String(b.postKey || '-').slice(0, 100),
+        status: String(b.status || '').slice(0, 20),
+        detail: b.detail || {},
+        business: String(b.business || '').slice(0, 100),
+        staffName: String(b.staffName || '').slice(0, 100),
+        appVersion: String(b.appVersion || '').slice(0, 50),
+        device: String(b.device || '').slice(0, 300)
+      };
+      console.log('[CLIENT-DIAG] ' + entry.business + ' / ' + entry.staffName + ' -> ' + entry.step + ' [' + entry.status + '] ' + JSON.stringify(entry.detail).slice(0, 300));
+    } else {
+      entry = {
+        ts: Date.now(),
+        when: new Date().toISOString(),
+        kind: 'error',
+        message: String(b.message || '').slice(0, 500),
+        stack: String(b.stack || '').slice(0, 1500),
+        page: String(b.page || '').slice(0, 200),
+        business: String(b.business || '').slice(0, 100),
+        staffName: String(b.staffName || '').slice(0, 100),
+        appVersion: String(b.appVersion || '').slice(0, 50),
+        device: String(b.device || '').slice(0, 300)
+      };
+      // ── LIVE VISIBILITY: Railway ke Deploy Logs mein turant dikhega ──
+      console.log('[CLIENT-ERROR] ' + entry.business + ' / ' + entry.staffName + ' -> ' + entry.message + ' @ ' + entry.page);
+    }
+    errorReports.push(entry);
+    if (errorReports.length > 500) errorReports = errorReports.slice(errorReports.length - 500);
+    saveErrorReportsDebounced();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── History dekhne ke liye — browser mein seedha kholein ──
+app.get('/api/error-reports', (req, res) => {
+  res.json(errorReports.slice().reverse());
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('VyralJin Server v7.0-noscale on port ' + PORT));
