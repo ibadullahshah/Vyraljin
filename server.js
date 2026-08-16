@@ -818,5 +818,104 @@ app.get('/api/error-reports', (req, res) => {
   res.json(errorReports.slice().reverse());
 });
 
+// ══════ PHOTOS → REEL — jaisa maanga gaya ══════
+// 1-5 photos leta hai, har photo par Ken Burns effect (zoom-in/zoom-out/
+// pan, alag-alag variety ke liye) lagata hai, aur agar multiple photos
+// hon to smooth crossfade se ek doosre mein badalta hai. Result ek
+// SILENT video hai (bina music/banner ke) — user isi ko normal video ki
+// tarah editor mein khol kar music/banner/caption/AI-hooks add karega,
+// jaisa kisi bhi upload ki hui video ke sath karta hai.
+app.post('/api/photos-to-video', upload.array('photos', 5), async (req, res) => {
+  const files = req.files || [];
+  if (!files.length) return res.status(400).json({ error: 'No photos' });
+  const { spawn } = require('child_process');
+  const durationPerPhoto = Math.max(2, Math.min(8, parseFloat(req.body.duration) || 3.5));
+  const out = '/tmp/reel_' + Date.now() + '.mp4';
+
+  console.log('[PHOTOS-TO-VIDEO] ' + files.length + ' photo(s), ' + durationPerPhoto + 's each');
+
+  // ── Har photo ko pehle 1080x1920 (portrait) canvas par center-crop/scale
+  // karte hain, taake sab photos ka size/ratio consistent ho (Ken Burns
+  // zoom ke liye zaroori) — chahe original photo kisi bhi shape ki ho. ──
+  const W = 1080, H = 1920;
+  // FIX (NEW — "behtareen video" ke liye): har photo ka apna ALAG movement
+  // ho (koi zoom-in, koi zoom-out, koi halka pan) — taake reel mein variety
+  // aaye, sab photos ek jaisi "mechanical" na lagein. Ken Burns zoompan
+  // filter mein "z" (zoom expression) frame-by-frame smoothly badalta hai.
+  const movements = [
+    // zoom-in center
+    (fr) => `z='min(zoom+0.0015,1.25)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${fr}:s=${W}x${H}`,
+    // zoom-out (shuru mein zoomed, dheere-dheere normal)
+    (fr) => `z='if(eq(on,0),1.22,max(zoom-0.0015,1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${fr}:s=${W}x${H}`,
+    // zoom-in + halka left-pan
+    (fr) => `z='min(zoom+0.0013,1.2)':x='iw/2-(iw/zoom/2)-20':y='ih/2-(ih/zoom/2)':d=${fr}:s=${W}x${H}`,
+    // zoom-in + halka right-pan
+    (fr) => `z='min(zoom+0.0013,1.2)':x='iw/2-(iw/zoom/2)+20':y='ih/2-(ih/zoom/2)':d=${fr}:s=${W}x${H}`,
+    // zoom-in + halka upward-pan
+    (fr) => `z='min(zoom+0.0014,1.22)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)-15':d=${fr}:s=${W}x${H}`
+  ];
+
+  const fps = 30;
+  const framesPerPhoto = Math.round(durationPerPhoto * fps);
+
+  // ── Har photo ke liye ek alag input + zoompan filter-chain banate hain ──
+  const args = ['-y'];
+  files.forEach(f => { args.push('-loop', '1', '-t', String(durationPerPhoto + 1), '-i', f.path); });
+
+  let filterParts = [];
+  files.forEach((f, i) => {
+    const mv = movements[i % movements.length](framesPerPhoto);
+    filterParts.push(
+      `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},zoompan=${mv},fps=${fps},format=yuv420p[v${i}]`
+    );
+  });
+
+  let lastLabel;
+  if (files.length === 1) {
+    lastLabel = 'v0';
+  } else {
+    // ── Crossfade (xfade) se consecutive photos ek doosre mein smoothly
+    // ghulti hain — 0.6 second ka fade, har photo ke aakhri hisse mein ──
+    const fadeDur = 0.6;
+    let cumulative = durationPerPhoto;
+    let prevLabel = 'v0';
+    for (let i = 1; i < files.length; i++) {
+      const offset = Math.max(0, cumulative - fadeDur);
+      const outLabel = 'x' + i;
+      filterParts.push(`[${prevLabel}][v${i}]xfade=transition=fade:duration=${fadeDur}:offset=${offset.toFixed(2)}[${outLabel}]`);
+      prevLabel = outLabel;
+      cumulative += durationPerPhoto - fadeDur;
+    }
+    lastLabel = prevLabel;
+  }
+
+  const filterComplex = filterParts.join(';');
+  args.push('-filter_complex', filterComplex);
+  args.push('-map', '[' + lastLabel + ']');
+  args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-r', String(fps));
+  args.push('-movflags', '+faststart');
+  args.push(out);
+
+  const ff = spawn(FFMPEG_BIN, args);
+  let err = '';
+  ff.stderr.on('data', d => { err += d.toString(); });
+  ff.on('close', code => {
+    files.forEach(f => fs.unlink(f.path, () => {}));
+    if (code !== 0) {
+      console.log('[PHOTOS-TO-VIDEO] FFmpeg failed:', err.slice(-1000));
+      return res.status(500).json({ error: 'Reel banane mein masla aaya', detail: err.slice(-1000) });
+    }
+    res.setHeader('Content-Type', 'video/mp4');
+    const s = fs.createReadStream(out);
+    s.pipe(res);
+    s.on('end', () => fs.unlink(out, () => {}));
+    s.on('error', () => fs.unlink(out, () => {}));
+  });
+  setTimeout(() => {
+    ff.kill('SIGKILL');
+    if (!res.headersSent) res.status(500).json({ error: 'Timeout' });
+  }, 180000);
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('VyralJin Server v7.0-noscale on port ' + PORT));
