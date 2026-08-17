@@ -825,6 +825,30 @@ app.get('/api/error-reports', (req, res) => {
 // tha, dead code). Asal zaroorat simple hai: EK photo + background music
 // — static frame (koi zoom/pan animation nahi), default 10s (client se
 // 2-30s tak aata hai, Cutting slider se control hota hai).
+// FIX (ROOT CAUSE — jaisa maanga gaya, "video ke upar-neeche black jagah
+// aati hai"): pehle photo hamesha ek FIXED 1080x1920 canvas mein fit ki
+// jaati thi (decrease+pad) — agar photo ka apna ratio 1080x1920 se mel na
+// khaye, to bachi hui jagah black bar se bharni padti thi. Ab photo ki
+// ASAL dimensions FFmpeg se hi nikal kar (koi alag ffprobe binary ki
+// zaroorat nahi), output video USI ratio mein banate hain — jitni pic
+// hai, utna hi video, koi bhi extra black screen nahi.
+function vjProbeImageDims(ffmpegBin, imgPath) {
+  return new Promise((resolve) => {
+    try {
+      const { spawn: _spawn } = require('child_process');
+      const p = _spawn(ffmpegBin, ['-i', imgPath]);
+      let out = '';
+      p.stderr.on('data', d => { out += d.toString(); });
+      p.on('close', () => {
+        const m = out.match(/Video:.*?(\d{2,5})x(\d{2,5})/);
+        if (m) resolve({ w: parseInt(m[1], 10), h: parseInt(m[2], 10) });
+        else resolve(null);
+      });
+      p.on('error', () => resolve(null));
+    } catch (e) { resolve(null); }
+  });
+}
+
 app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 1 }, { name: 'music', maxCount: 1 }]), async (req, res) => {
   const photo = (req.files && req.files.photos && req.files.photos[0]) || null;
   const musicFile = (req.files && req.files.music && req.files.music[0]) || null;
@@ -835,19 +859,24 @@ app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 1 },
 
   console.log('[PHOTO-MUSIC] duration=' + duration + 's, music=' + (musicFile ? 'yes' : 'no'));
 
-  // 1080x1920 (portrait) canvas par center-fit — static frame, koi
-  // zoom/pan nahi, poori duration tak same rehta hai.
-  // FIX (ROOT CAUSE — "final video mein pic zoom ho jati hai, preview
-  // jaisi nahi hoti"): editor preview mein photo object-fit:CONTAIN se
-  // dikhti hai (poori photo, koi crop nahi). Yahan pehle
-  // force_original_aspect_ratio=increase+crop (= object-fit:COVER) tha —
-  // jo frame bharne ke liye photo ko zoom/crop kar deta tha. Ab
-  // decrease+pad (= object-fit:CONTAIN, preview jaisa hi) — poori photo
-  // nazar aayegi, bachi hui jagah black bar se bharti hai.
-  const W = 1080, H = 1920, fps = 30;
+  // Photo ki apni ASAL dimensions detect karo — koi fixed canvas nahi.
+  // Width/height dono even (libx264 ki zaroorat) rakhte hain, aur bohot
+  // bade photo ko 1440px (longer side) tak cap karte hain taake encode
+  // fast rahe. Detect fail ho (bohot rare) to 1080x1920 fallback.
+  const fps = 30;
+  const dims = await vjProbeImageDims(FFMPEG_BIN, photo.path);
+  let W, H;
+  if (dims && dims.w > 0 && dims.h > 0) {
+    const maxSide = 1440;
+    const scaleDown = Math.min(1, maxSide / Math.max(dims.w, dims.h));
+    W = Math.round(dims.w * scaleDown / 2) * 2;
+    H = Math.round(dims.h * scaleDown / 2) * 2;
+  } else {
+    W = 1080; H = 1920;
+  }
 
   const args = ['-y', '-loop', '1', '-t', String(duration + 1), '-i', photo.path];
-  const videoFilter = `[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p,fps=${fps}[v0]`;
+  const videoFilter = `[0:v]scale=${W}:${H},format=yuv420p,fps=${fps}[v0]`;
 
   const musicStart = Math.max(0, parseFloat(req.body.musicStart) || 0);
   const musicEnd = musicStart + duration;
