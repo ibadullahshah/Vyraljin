@@ -825,8 +825,16 @@ app.get('/api/error-reports', (req, res) => {
 // SILENT video hai (bina music/banner ke) — user isi ko normal video ki
 // tarah editor mein khol kar music/banner/caption/AI-hooks add karega,
 // jaisa kisi bhi upload ki hui video ke sath karta hai.
-app.post('/api/photos-to-video', upload.array('photos', 5), async (req, res) => {
-  const files = req.files || [];
+// FIX (ROOT CAUSE #1 — "Reel nahi ban saki"): pehle sirf 'photos' field
+// accept hoti thi (upload.array('photos',5)). Client jab music file bhi
+// 'music' naam ke field mein bhejta tha, to Multer is UNEXPECTED file
+// field par poori request hi reject kar deta tha ("Unexpected field"
+// error), aur ffmpeg chalne se pehle hi 500 error wapas chala jata —
+// isi liye "Reel nahi ban saki" dikhta tha. Ab dono fields ('photos' aur
+// 'music') explicitly accept ki ja rahi hain.
+app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 5 }, { name: 'music', maxCount: 1 }]), async (req, res) => {
+  const files = (req.files && req.files.photos) || [];
+  const musicFile = (req.files && req.files.music && req.files.music[0]) || null;
   if (!files.length) return res.status(400).json({ error: 'No photos' });
   const { spawn } = require('child_process');
   const durationPerPhoto = Math.max(2, Math.min(8, parseFloat(req.body.duration) || 3.5));
@@ -871,6 +879,7 @@ app.post('/api/photos-to-video', upload.array('photos', 5), async (req, res) => 
   });
 
   let lastLabel;
+  let totalDuration = durationPerPhoto;
   if (files.length === 1) {
     lastLabel = 'v0';
   } else {
@@ -887,12 +896,35 @@ app.post('/api/photos-to-video', upload.array('photos', 5), async (req, res) => 
       cumulative += durationPerPhoto - fadeDur;
     }
     lastLabel = prevLabel;
+    totalDuration = cumulative;
   }
+
+  // FIX (ROOT CAUSE #2 — video hamesha khamosh banti thi): pehle ye endpoint
+  // sirf silent Ken-Burns video banata tha — musicFile, musicStart, musicEnd,
+  // musicVol kabhi bhi ffmpeg command mein shamil hi nahi hote the. Ab agar
+  // client ne music bheji hai to usay video ke sath trim/volume laga kar
+  // mux kiya jayega.
+  const musicStart = Math.max(0, parseFloat(req.body.musicStart) || 0);
+  let musicEnd = parseFloat(req.body.musicEnd) || 0;
+  if (!musicEnd || musicEnd <= musicStart) musicEnd = musicStart + totalDuration;
+  const musicVolRaw = parseFloat(req.body.musicVol);
+  const musicVol = isFinite(musicVolRaw) ? (musicVolRaw > 1 ? musicVolRaw / 100 : musicVolRaw) : 0.6;
 
   const filterComplex = filterParts.join(';');
   args.push('-filter_complex', filterComplex);
-  args.push('-map', '[' + lastLabel + ']');
-  args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-r', String(fps));
+
+  if (musicFile) {
+    args.push('-i', musicFile.path);
+    const audioIdx = files.length; // music input ka index (photos ke baad)
+    const audioFilter = `[${audioIdx}:a]atrim=start=${musicStart}:end=${musicEnd},asetpts=PTS-STARTPTS,volume=${musicVol},afade=t=out:st=${Math.max(0, totalDuration - 0.6).toFixed(2)}:d=0.6[aout]`;
+    args[args.indexOf('-filter_complex') + 1] = filterComplex + ';' + audioFilter;
+    args.push('-map', '[' + lastLabel + ']', '-map', '[aout]');
+    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-r', String(fps));
+    args.push('-c:a', 'aac', '-b:a', '128k', '-shortest');
+  } else {
+    args.push('-map', '[' + lastLabel + ']');
+    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-r', String(fps));
+  }
   args.push('-movflags', '+faststart');
   args.push(out);
 
@@ -901,6 +933,7 @@ app.post('/api/photos-to-video', upload.array('photos', 5), async (req, res) => 
   ff.stderr.on('data', d => { err += d.toString(); });
   ff.on('close', code => {
     files.forEach(f => fs.unlink(f.path, () => {}));
+    if (musicFile) fs.unlink(musicFile.path, () => {});
     if (code !== 0) {
       console.log('[PHOTOS-TO-VIDEO] FFmpeg failed:', err.slice(-1000));
       return res.status(500).json({ error: 'Reel banane mein masla aaya', detail: err.slice(-1000) });
