@@ -846,35 +846,21 @@ app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 5 },
   // karte hain, taake sab photos ka size/ratio consistent ho (Ken Burns
   // zoom ke liye zaroori) — chahe original photo kisi bhi shape ki ho. ──
   const W = 1080, H = 1920;
-  // FIX (NEW — "behtareen video" ke liye): har photo ka apna ALAG movement
-  // ho (koi zoom-in, koi zoom-out, koi halka pan) — taake reel mein variety
-  // aaye, sab photos ek jaisi "mechanical" na lagein. Ken Burns zoompan
-  // filter mein "z" (zoom expression) frame-by-frame smoothly badalta hai.
-  const movements = [
-    // zoom-in center
-    (fr) => `z='min(zoom+0.0015,1.25)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${fr}:s=${W}x${H}`,
-    // zoom-out (shuru mein zoomed, dheere-dheere normal)
-    (fr) => `z='if(eq(on,0),1.22,max(zoom-0.0015,1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${fr}:s=${W}x${H}`,
-    // zoom-in + halka left-pan
-    (fr) => `z='min(zoom+0.0013,1.2)':x='iw/2-(iw/zoom/2)-20':y='ih/2-(ih/zoom/2)':d=${fr}:s=${W}x${H}`,
-    // zoom-in + halka right-pan
-    (fr) => `z='min(zoom+0.0013,1.2)':x='iw/2-(iw/zoom/2)+20':y='ih/2-(ih/zoom/2)':d=${fr}:s=${W}x${H}`,
-    // zoom-in + halka upward-pan
-    (fr) => `z='min(zoom+0.0014,1.22)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)-15':d=${fr}:s=${W}x${H}`
-  ];
-
+  // FIX (jaisa maanga gaya — SIMPLE TikTok-style photo post): koi zoom/pan
+  // motion nahi chahiye, sirf static photo dikhni chahiye upar music baji
+  // rahe. Isliye Ken Burns/zoompan filter poori tarah hata diya gaya —
+  // ab sirf photo ko frame mein fit karke static rakha jata hai.
   const fps = 30;
-  const framesPerPhoto = Math.round(durationPerPhoto * fps);
 
-  // ── Har photo ke liye ek alag input + zoompan filter-chain banate hain ──
+  // ── Har photo ke liye ek alag input, koi motion filter nahi — bilkul
+  // static frame, poori duration tak ──
   const args = ['-y'];
   files.forEach(f => { args.push('-loop', '1', '-t', String(durationPerPhoto + 1), '-i', f.path); });
 
   let filterParts = [];
   files.forEach((f, i) => {
-    const mv = movements[i % movements.length](framesPerPhoto);
     filterParts.push(
-      `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},zoompan=${mv},fps=${fps},format=yuv420p[v${i}]`
+      `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},format=yuv420p,fps=${fps}[v${i}]`
     );
   });
 
