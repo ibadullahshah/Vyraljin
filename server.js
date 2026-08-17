@@ -818,97 +818,45 @@ app.get('/api/error-reports', (req, res) => {
   res.json(errorReports.slice().reverse());
 });
 
-// ══════ PHOTOS → REEL — jaisa maanga gaya ══════
-// 1-5 photos leta hai, har photo par Ken Burns effect (zoom-in/zoom-out/
-// pan, alag-alag variety ke liye) lagata hai, aur agar multiple photos
-// hon to smooth crossfade se ek doosre mein badalta hai. Result ek
-// SILENT video hai (bina music/banner ke) — user isi ko normal video ki
-// tarah editor mein khol kar music/banner/caption/AI-hooks add karega,
-// jaisa kisi bhi upload ki hui video ke sath karta hai.
-// FIX (ROOT CAUSE #1 — "Reel nahi ban saki"): pehle sirf 'photos' field
-// accept hoti thi (upload.array('photos',5)). Client jab music file bhi
-// 'music' naam ke field mein bhejta tha, to Multer is UNEXPECTED file
-// field par poori request hi reject kar deta tha ("Unexpected field"
-// error), aur ffmpeg chalne se pehle hi 500 error wapas chala jata —
-// isi liye "Reel nahi ban saki" dikhta tha. Ab dono fields ('photos' aur
-// 'music') explicitly accept ki ja rahi hain.
-app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 5 }, { name: 'music', maxCount: 1 }]), async (req, res) => {
-  const files = (req.files && req.files.photos) || [];
+// ══════ PHOTO + BACKGROUND MUSIC ══════
+// FIX (SIMPLIFIED — jaisa maanga gaya, poora "reel" system hataya): pehle
+// ye endpoint multi-photo Ken-Burns/crossfade "reel" bhi banata tha —
+// lekin client mein ab wo feature hi nahi bacha (koi button wired nahi
+// tha, dead code). Asal zaroorat simple hai: EK photo + background music
+// — static frame (koi zoom/pan animation nahi), default 10s (client se
+// 2-30s tak aata hai, Cutting slider se control hota hai).
+app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 1 }, { name: 'music', maxCount: 1 }]), async (req, res) => {
+  const photo = (req.files && req.files.photos && req.files.photos[0]) || null;
   const musicFile = (req.files && req.files.music && req.files.music[0]) || null;
-  if (!files.length) return res.status(400).json({ error: 'No photos' });
+  if (!photo) return res.status(400).json({ error: 'No photo' });
   const { spawn } = require('child_process');
-  const durationPerPhoto = Math.max(2, Math.min(8, parseFloat(req.body.duration) || 3.5));
+  const duration = Math.max(2, Math.min(30, parseFloat(req.body.duration) || 10));
   const out = '/tmp/reel_' + Date.now() + '.mp4';
 
-  console.log('[PHOTOS-TO-VIDEO] ' + files.length + ' photo(s), ' + durationPerPhoto + 's each');
+  console.log('[PHOTO-MUSIC] duration=' + duration + 's, music=' + (musicFile ? 'yes' : 'no'));
 
-  // ── Har photo ko pehle 1080x1920 (portrait) canvas par center-crop/scale
-  // karte hain, taake sab photos ka size/ratio consistent ho (Ken Burns
-  // zoom ke liye zaroori) — chahe original photo kisi bhi shape ki ho. ──
-  const W = 1080, H = 1920;
-  // FIX (jaisa maanga gaya — SIMPLE TikTok-style photo post): koi zoom/pan
-  // motion nahi chahiye, sirf static photo dikhni chahiye upar music baji
-  // rahe. Isliye Ken Burns/zoompan filter poori tarah hata diya gaya —
-  // ab sirf photo ko frame mein fit karke static rakha jata hai.
-  const fps = 30;
+  // 1080x1920 (portrait) canvas par center-crop/scale — static frame,
+  // koi zoom/pan nahi, poori duration tak same rehta hai.
+  const W = 1080, H = 1920, fps = 30;
 
-  // ── Har photo ke liye ek alag input, koi motion filter nahi — bilkul
-  // static frame, poori duration tak ──
-  const args = ['-y'];
-  files.forEach(f => { args.push('-loop', '1', '-t', String(durationPerPhoto + 1), '-i', f.path); });
+  const args = ['-y', '-loop', '1', '-t', String(duration + 1), '-i', photo.path];
+  const videoFilter = `[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},format=yuv420p,fps=${fps}[v0]`;
 
-  let filterParts = [];
-  files.forEach((f, i) => {
-    filterParts.push(
-      `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},format=yuv420p,fps=${fps}[v${i}]`
-    );
-  });
-
-  let lastLabel;
-  let totalDuration = durationPerPhoto;
-  if (files.length === 1) {
-    lastLabel = 'v0';
-  } else {
-    // ── Crossfade (xfade) se consecutive photos ek doosre mein smoothly
-    // ghulti hain — 0.6 second ka fade, har photo ke aakhri hisse mein ──
-    const fadeDur = 0.6;
-    let cumulative = durationPerPhoto;
-    let prevLabel = 'v0';
-    for (let i = 1; i < files.length; i++) {
-      const offset = Math.max(0, cumulative - fadeDur);
-      const outLabel = 'x' + i;
-      filterParts.push(`[${prevLabel}][v${i}]xfade=transition=fade:duration=${fadeDur}:offset=${offset.toFixed(2)}[${outLabel}]`);
-      prevLabel = outLabel;
-      cumulative += durationPerPhoto - fadeDur;
-    }
-    lastLabel = prevLabel;
-    totalDuration = cumulative;
-  }
-
-  // FIX (ROOT CAUSE #2 — video hamesha khamosh banti thi): pehle ye endpoint
-  // sirf silent Ken-Burns video banata tha — musicFile, musicStart, musicEnd,
-  // musicVol kabhi bhi ffmpeg command mein shamil hi nahi hote the. Ab agar
-  // client ne music bheji hai to usay video ke sath trim/volume laga kar
-  // mux kiya jayega.
   const musicStart = Math.max(0, parseFloat(req.body.musicStart) || 0);
-  let musicEnd = parseFloat(req.body.musicEnd) || 0;
-  if (!musicEnd || musicEnd <= musicStart) musicEnd = musicStart + totalDuration;
+  const musicEnd = musicStart + duration;
   const musicVolRaw = parseFloat(req.body.musicVol);
   const musicVol = isFinite(musicVolRaw) ? (musicVolRaw > 1 ? musicVolRaw / 100 : musicVolRaw) : 0.6;
 
-  const filterComplex = filterParts.join(';');
-  args.push('-filter_complex', filterComplex);
-
   if (musicFile) {
     args.push('-i', musicFile.path);
-    const audioIdx = files.length; // music input ka index (photos ke baad)
-    const audioFilter = `[${audioIdx}:a]atrim=start=${musicStart}:end=${musicEnd},asetpts=PTS-STARTPTS,volume=${musicVol},afade=t=out:st=${Math.max(0, totalDuration - 0.6).toFixed(2)}:d=0.6[aout]`;
-    args[args.indexOf('-filter_complex') + 1] = filterComplex + ';' + audioFilter;
-    args.push('-map', '[' + lastLabel + ']', '-map', '[aout]');
+    const audioFilter = `[1:a]atrim=start=${musicStart}:end=${musicEnd},asetpts=PTS-STARTPTS,volume=${musicVol},afade=t=out:st=${Math.max(0, duration - 0.6).toFixed(2)}:d=0.6[aout]`;
+    args.push('-filter_complex', videoFilter + ';' + audioFilter);
+    args.push('-map', '[v0]', '-map', '[aout]');
     args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-r', String(fps));
     args.push('-c:a', 'aac', '-b:a', '128k', '-shortest');
   } else {
-    args.push('-map', '[' + lastLabel + ']');
+    args.push('-filter_complex', videoFilter);
+    args.push('-map', '[v0]');
     args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-r', String(fps));
   }
   args.push('-movflags', '+faststart');
@@ -918,11 +866,11 @@ app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 5 },
   let err = '';
   ff.stderr.on('data', d => { err += d.toString(); });
   ff.on('close', code => {
-    files.forEach(f => fs.unlink(f.path, () => {}));
+    fs.unlink(photo.path, () => {});
     if (musicFile) fs.unlink(musicFile.path, () => {});
     if (code !== 0) {
-      console.log('[PHOTOS-TO-VIDEO] FFmpeg failed:', err.slice(-1000));
-      return res.status(500).json({ error: 'Reel banane mein masla aaya', detail: err.slice(-1000) });
+      console.log('[PHOTO-MUSIC] FFmpeg failed:', err.slice(-1000));
+      return res.status(500).json({ error: 'Video banane mein masla aaya', detail: err.slice(-1000) });
     }
     res.setHeader('Content-Type', 'video/mp4');
     const s = fs.createReadStream(out);
