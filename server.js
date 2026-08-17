@@ -835,20 +835,38 @@ app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 1 },
 
   console.log('[PHOTO-MUSIC] duration=' + duration + 's, music=' + (musicFile ? 'yes' : 'no'));
 
-  // 1080x1920 (portrait) canvas par center-crop/scale — static frame,
-  // koi zoom/pan nahi, poori duration tak same rehta hai.
+  // 1080x1920 (portrait) canvas par center-fit — static frame, koi
+  // zoom/pan nahi, poori duration tak same rehta hai.
+  // FIX (ROOT CAUSE — "final video mein pic zoom ho jati hai, preview
+  // jaisi nahi hoti"): editor preview mein photo object-fit:CONTAIN se
+  // dikhti hai (poori photo, koi crop nahi). Yahan pehle
+  // force_original_aspect_ratio=increase+crop (= object-fit:COVER) tha —
+  // jo frame bharne ke liye photo ko zoom/crop kar deta tha. Ab
+  // decrease+pad (= object-fit:CONTAIN, preview jaisa hi) — poori photo
+  // nazar aayegi, bachi hui jagah black bar se bharti hai.
   const W = 1080, H = 1920, fps = 30;
 
   const args = ['-y', '-loop', '1', '-t', String(duration + 1), '-i', photo.path];
-  const videoFilter = `[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},format=yuv420p,fps=${fps}[v0]`;
+  const videoFilter = `[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p,fps=${fps}[v0]`;
 
   const musicStart = Math.max(0, parseFloat(req.body.musicStart) || 0);
   const musicEnd = musicStart + duration;
   const musicVolRaw = parseFloat(req.body.musicVol);
   const musicVol = isFinite(musicVolRaw) ? (musicVolRaw > 1 ? musicVolRaw / 100 : musicVolRaw) : 0.6;
 
-  if (musicFile) {
-    args.push('-i', musicFile.path);
+  // FIX (ROOT CAUSE — native background-upload se music silently drop ho
+  // rahi thi): pehle sirf uploaded 'music' FILE accept hoti thi. Native
+  // side (postPhotoMusic) 'musicUrl' STRING bhejta hai (bilkul /api/render
+  // ki tarah) — server khud Bunny CDN se download karta hai. Ab 'musicUrl'
+  // bhi accept hoti hai.
+  let musicPath = musicFile ? musicFile.path : null;
+  let _downloadedMusicPath = null;
+  if (!musicPath && req.body.musicUrl) {
+    musicPath = _downloadedMusicPath = await vjDownloadMusic(req.body.musicUrl);
+  }
+
+  if (musicPath) {
+    args.push('-i', musicPath);
     const audioFilter = `[1:a]atrim=start=${musicStart}:end=${musicEnd},asetpts=PTS-STARTPTS,volume=${musicVol},afade=t=out:st=${Math.max(0, duration - 0.6).toFixed(2)}:d=0.6[aout]`;
     args.push('-filter_complex', videoFilter + ';' + audioFilter);
     args.push('-map', '[v0]', '-map', '[aout]');
@@ -868,6 +886,7 @@ app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 1 },
   ff.on('close', code => {
     fs.unlink(photo.path, () => {});
     if (musicFile) fs.unlink(musicFile.path, () => {});
+    if (_downloadedMusicPath) fs.unlink(_downloadedMusicPath, () => {});
     if (code !== 0) {
       console.log('[PHOTO-MUSIC] FFmpeg failed:', err.slice(-1000));
       return res.status(500).json({ error: 'Video banane mein masla aaya', detail: err.slice(-1000) });
