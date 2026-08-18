@@ -84,6 +84,20 @@ function saveTrashedPostsDebounced(){
 
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, bunnyHost: BUNNY_HOST, gemini: !!GEMINI_KEY }));
+// ══ TEMP DIAGNOSTIC: Railway env-vars ki asal Bunny zone/key (masked) dikhata
+// hai — taake Admin Config tab mein jo values dali hain unse compare kar sakein.
+// Poora key kabhi expose nahi hota, sirf shuru/aakhir ke 4 characters + length.
+// TESTING KHATAM HONE KE BAAD YE ENDPOINT HATA DENA — security ke liye. ══
+app.get('/api/debug-bunny-config', (req, res) => {
+  const mask = (s) => !s ? '(khaali)' : (s.length <= 8 ? '*'.repeat(s.length) : s.slice(0,4)+'...'+s.slice(-4));
+  res.json({
+    zone: BUNNY_ZONE || '(khaali — Railway Variables mein BUNNY_ZONE set nahi)',
+    zoneLength: (BUNNY_ZONE||'').length,
+    keyPreview: mask(BUNNY_KEY),
+    keyLength: (BUNNY_KEY||'').length,
+    bunnyHost: BUNNY_HOST
+  });
+});
 app.get('/api/config', (req, res) => res.json({
   pullzone: BUNNY_PULLZONE, hasBunny: !!BUNNY_KEY, hasGemini: !!GEMINI_KEY,
   hasFirebase: !!(FIREBASE_KEY && FIREBASE_DB_URL),
