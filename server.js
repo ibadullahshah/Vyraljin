@@ -167,6 +167,90 @@ app.get('/api/trashed-posts', (req, res) => {
   res.json(trashedPosts);
 });
 
+// ===== SHARE-LOCK SYNC - cross-device (VyralJin) =====
+// Jab koi device kisi post ka multi-platform share shuru kare, 15-min lock
+// yahan record hota hai taake DOOSRA device isay sath hi sath share na kare.
+let shareLocks = {};
+const SHARELOCKS_FILE = 'vj_share_locks.json';
+let _slSaveTimer = null;
+const SHARE_LOCK_MS = 15 * 60 * 1000;
+bunnyGetJSON(SHARELOCKS_FILE).then(data=>{ if(data && typeof data==='object') shareLocks = data; }).catch(()=>{});
+function saveShareLocksDebounced(){
+  if(_slSaveTimer) clearTimeout(_slSaveTimer);
+  _slSaveTimer = setTimeout(()=>{ bunnyPutJSON(SHARELOCKS_FILE, shareLocks).catch(()=>{}); }, 3000);
+}
+function isLockExpired(lock){ return!lock || (Date.now() - lock.ts) > SHARE_LOCK_MS; }
+
+app.post('/api/lock-share', jsonParser, (req, res) => {
+  const videoURL = req.body && req.body.videoURL;
+  const deviceId = (req.body && req.body.deviceId) || 'unknown';
+  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
+  const existing = shareLocks[videoURL];
+  if (existing &&!isLockExpired(existing) && existing.deviceId!== deviceId) {
+    return res.json({ ok: true, locked: false, ownerDeviceId: existing.deviceId, remainingMs: SHARE_LOCK_MS - (Date.now() - existing.ts) });
+  }
+  shareLocks[videoURL] = { deviceId, ts: Date.now() };
+  saveShareLocksDebounced();
+  res.json({ ok: true, locked: true });
+});
+
+app.get('/api/share-lock', (req, res) => {
+  const existing = req.query.videoURL? shareLocks[req.query.videoURL] : null;
+  if (!existing || isLockExpired(existing)) return res.json({ locked: false });
+  res.json({ locked: true, ownerDeviceId: existing.deviceId, remainingMs: SHARE_LOCK_MS - (Date.now() - existing.ts) });
+});
+
+app.post('/api/unlock-share', jsonParser, (req, res) => {
+  const videoURL = req.body && req.body.videoURL;
+  const deviceId = (req.body && req.body.deviceId) || 'unknown';
+  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
+  const existing = shareLocks[videoURL];
+  if (existing && existing.deviceId === deviceId) { delete shareLocks[videoURL]; saveShareLocksDebounced(); }
+  res.json({ ok: true });
+});
+
+// ===== SHARE-LOCK SYNC - cross-device (VyralJin) =====
+// Jab koi device kisi post ka multi-platform share shuru kare, 15-min lock
+// yahan record hota hai taake DOOSRA device isay sath hi sath share na kare.
+let shareLocks = {};
+const SHARELOCKS_FILE = 'vj_share_locks.json';
+let _slSaveTimer = null;
+const SHARE_LOCK_MS = 15 * 60 * 1000;
+bunnyGetJSON(SHARELOCKS_FILE).then(data=>{ if(data && typeof data==='object') shareLocks = data; }).catch(()=>{});
+function saveShareLocksDebounced(){
+  if(_slSaveTimer) clearTimeout(_slSaveTimer);
+  _slSaveTimer = setTimeout(()=>{ bunnyPutJSON(SHARELOCKS_FILE, shareLocks).catch(()=>{}); }, 3000);
+}
+function isLockExpired(lock){ return!lock || (Date.now() - lock.ts) > SHARE_LOCK_MS; }
+
+app.post('/api/lock-share', jsonParser, (req, res) => {
+  const videoURL = req.body && req.body.videoURL;
+  const deviceId = (req.body && req.body.deviceId) || 'unknown';
+  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
+  const existing = shareLocks[videoURL];
+  if (existing &&!isLockExpired(existing) && existing.deviceId!== deviceId) {
+    return res.json({ ok: true, locked: false, ownerDeviceId: existing.deviceId, remainingMs: SHARE_LOCK_MS - (Date.now() - existing.ts) });
+  }
+  shareLocks[videoURL] = { deviceId, ts: Date.now() };
+  saveShareLocksDebounced();
+  res.json({ ok: true, locked: true });
+});
+
+app.get('/api/share-lock', (req, res) => {
+  const existing = req.query.videoURL? shareLocks[req.query.videoURL] : null;
+  if (!existing || isLockExpired(existing)) return res.json({ locked: false });
+  res.json({ locked: true, ownerDeviceId: existing.deviceId, remainingMs: SHARE_LOCK_MS - (Date.now() - existing.ts) });
+});
+
+app.post('/api/unlock-share', jsonParser, (req, res) => {
+  const videoURL = req.body && req.body.videoURL;
+  const deviceId = (req.body && req.body.deviceId) || 'unknown';
+  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
+  const existing = shareLocks[videoURL];
+  if (existing && existing.deviceId === deviceId) { delete shareLocks[videoURL]; saveShareLocksDebounced(); }
+  res.json({ ok: true });
+});
+
 let _lastRenderErr='(abhi koi error nahi)';
 let _lastRenderParams='(abhi koi render nahi)';
 app.get('/api/lasterror',(req,res)=>res.type('text/plain').send('===PARAMS (permanent, overwrite nahi hote)===\n'+_lastRenderParams+'\n\n===LIVE STATUS===\n'+_lastRenderErr));
