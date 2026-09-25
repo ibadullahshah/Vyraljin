@@ -6,6 +6,10 @@ const https = require('https');
 const app = express();
 const upload = multer({ dest: '/tmp/uploads/', limits: { fileSize: 500 * 1024 * 1024 } });
 app.use(cors());
+// ── FIX: express.json() ab GLOBAL nahi hai — pehle ye har request (JSON content-type)
+// ka body intercept kar leta tha, jisse /api/bunny-upload (jo caption/banner JSON
+// bhejta hai) ko khaali stream milti thi aur Bunny par 0-byte file save ho jati thi.
+// Ab sirf un routes par lagega jinhe req.body chahiye. ──
 const jsonParser = express.json({ limit: '50mb' });
 
 const BUNNY_KEY = process.env.BUNNY_KEY || '';
@@ -54,6 +58,10 @@ function saveShareCountsDebounced(){
   _scSaveTimer = setTimeout(()=>{ bunnyPutJSON(SHARECOUNTS_FILE, shareCounts).catch(()=>{}); }, 3000);
 }
 
+// ══════ TRASH-THRESHOLD SYNC — cross-device (VyralJin) ══════
+// Jab kisi bhi device par ek post 3 platforms (ya total platforms) par share
+// ho jaye, uska waqt yahan record hota hai — taake HAR device is post ko
+// isi ek waqt se 20 min baad Trash mein bheje, na ke apne-apne alag waqt se.
 let trashThresholds = {};
 const TRASHTHRESH_FILE = 'vj_trash_thresholds.json';
 let _ttSaveTimer = null;
@@ -76,16 +84,6 @@ function saveTrashedPostsDebounced(){
 
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, bunnyHost: BUNNY_HOST, gemini: !!GEMINI_KEY }));
-app.get('/api/debug-bunny-config', (req, res) => {
-  const mask = (s) => !s ? '(khaali)' : (s.length <= 8 ? '*'.repeat(s.length) : s.slice(0,4)+'...'+s.slice(-4));
-  res.json({
-    zone: BUNNY_ZONE || '(khaali — Railway Variables mein BUNNY_ZONE set nahi)',
-    zoneLength: (BUNNY_ZONE||'').length,
-    keyPreview: mask(BUNNY_KEY),
-    keyLength: (BUNNY_KEY||'').length,
-    bunnyHost: BUNNY_HOST
-  });
-});
 app.get('/api/config', (req, res) => res.json({
   pullzone: BUNNY_PULLZONE, hasBunny: !!BUNNY_KEY, hasGemini: !!GEMINI_KEY,
   hasFirebase: !!(FIREBASE_KEY && FIREBASE_DB_URL),
@@ -116,6 +114,11 @@ app.get('/api/share-counts', (req, res) => {
   res.json(shareCounts);
 });
 
+// POST /api/mark-trash-threshold — { videoURL, ts }
+// FIX: sirf PEHLI dafa hi timestamp set hota hai (agar pehle se maujood ho
+// to ignore) — taake jo bhi device sabse pehle threshold cross kare, uska
+// waqt "official" ban jaye aur baaki sab devices isi ek waqt se 20-min
+// count karein, apne-apne alag waqt se nahi.
 app.post('/api/mark-trash-threshold', jsonParser, (req, res) => {
   const videoURL = req.body && req.body.videoURL;
   if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
@@ -151,6 +154,8 @@ app.get('/api/trashed-posts', (req, res) => {
 });
 
 // ===== SHARE-LOCK SYNC - cross-device (VyralJin) =====
+// Jab koi device kisi post ka multi-platform share shuru kare, 15-min lock
+// yahan record hota hai taake DOOSRA device isay sath hi sath share na kare.
 let shareLocks = {};
 const SHARELOCKS_FILE = 'vj_share_locks.json';
 let _slSaveTimer = null;
@@ -192,24 +197,23 @@ app.post('/api/unlock-share', jsonParser, (req, res) => {
 
 let _lastRenderErr='(abhi koi error nahi)';
 let _lastRenderParams='(abhi koi render nahi)';
-app.get('/api/lasterror',(req,res)=>res.type('text/plain').send('===PARAMS (permanent, overwrite nahi hote)===\n'+_lastRenderParams+'\n\n===LIVE STATUS===\n'+_lastRenderErr));
-app.post('/api/uptest', upload.fields([{name:'video',maxCount:1}]), (req,res)=>{
-  const vf=req.files['video']?.[0];
-  let sz=0; try{sz=fs.statSync(vf.path).size;}catch(e){}
-  if(vf)fs.unlink(vf.path,()=>{});
-  _lastRenderErr='UPTEST: video mili! size='+sz+' bytes, time='+new Date().toISOString();
-  res.json({ok:true,size:sz});
-});
-
 app.post('/api/gemini', jsonParser, async (req, res) => {
   const _gT0 = Date.now();
   if (!GEMINI_KEY) { console.log('[GEMINI] FAIL: No Gemini key configured on server'); return res.status(400).json({ error: 'No Gemini key' }); }
   const prompt = req.body.prompt || '';
   if (!prompt) { console.log('[GEMINI] FAIL: No prompt in request body'); return res.status(400).json({ error: 'No prompt' }); }
   const maxTok = parseInt(req.body.maxTokens) || 8192;
+  // FIX (NEW — AI topic guess): agar client image bhi bhejta hai, usay bhi
+  // prompt ke saath Gemini ko dikhao (vision).
   const _imgB64 = req.body.imageBase64 || null;
   const _imgMime = req.body.imageMime || 'image/jpeg';
   console.log('[GEMINI] Request received, promptLen=' + prompt.length + ', maxTokens=' + maxTok + (_imgB64?', with image':''));
+  // FIX: gemini-2.5-flash by default "thinking" (internal reasoning) tokens bhi
+  // maxOutputTokens budget mein se hi kaatta hai — isi wajah se poora budget
+  // sochne mein khatam ho jata tha aur asli visible caption sirf 100-200 chars
+  // ka reh jata tha (chahe HTTP 200 SUCCESS ho). thinkingBudget:0 se yeh
+  // internal reasoning bilkul band ho jati hai, taake poora token budget sirf
+  // asli caption text banane mein use ho.
   const _parts = _imgB64
     ? [{ text: prompt }, { inline_data: { mime_type: _imgMime, data: _imgB64 } }]
     : [{ text: prompt }];
@@ -263,6 +267,10 @@ app.get('/api/bunny-list', (req, res) => {
   r.on('error',e=>res.status(500).json({error:e.message})); r.end();
 });
 
+// ── FIX: pull-zone (CDN) se turant readback karne par propagation-delay/negative-cache
+// ki wajah se 404 mil sakta hai, chahe file storage zone par pehle se maujood ho. Yeh
+// endpoint seedha Bunny STORAGE API se padhta hai (CDN cache bypass), isliye turant aur
+// bharosemand result deta hai — verification isi ko use karega jab bunny_key/zone available ho ──
 app.get('/api/bunny-download', (req, res) => {
   if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
   const file = req.query.file;
@@ -279,6 +287,9 @@ app.post('/api/bunny-upload', (req, res) => {
   if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
   const file = req.query.file;
   if (!file) return res.status(400).json({ error: 'No filename' });
+  // FIX: pehle hamesha 'video/mp4' Content-Type bhejta tha, chahe file JSON ya
+  // image ho — extension se sahi mime-type nikalo taake JSON/image sidecar files
+  // Bunny par sahi tarah save/serve hon.
   const _extMimeMap = { '.json':'application/json', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.png':'image/png', '.webp':'image/webp', '.mp4':'video/mp4',
     '.mp3':'audio/mpeg', '.m4a':'audio/mp4', '.aac':'audio/aac', '.wav':'audio/wav', '.ogg':'audio/ogg', '.opus':'audio/opus' };
   const _fext = ((file.match(/\.[^.]+$/) || [''])[0]).toLowerCase();
@@ -301,10 +312,14 @@ app.post('/api/bunny-upload', (req, res) => {
   });
 });
 
+// ══════ RESUMABLE CHUNK UPLOAD — VyralJin ══════
+// App file ko 256KB tukron mein bhejti hai. Net toote to jitna aa chuka wo
+// /tmp mein mehfooz rehta hai — app usi offset se aagay bhejti hai, zero se
+// dobara kabhi nahi. Aakhri tukra aate hi poori file Bunny par PUT ho jati hai.
 const VJ_CHUNK_DIR = '/tmp/vj_chunks';
 if (!fs.existsSync(VJ_CHUNK_DIR)) fs.mkdirSync(VJ_CHUNK_DIR, { recursive: true });
 const vjChunkPath = f => VJ_CHUNK_DIR + '/' + String(f).replace(/[^a-zA-Z0-9._-]/g, '_');
-const vjDoneMap = {};
+const vjDoneMap = {}; // file -> {done, bunnyOk, total, mime}
 
 function vjBunnyPutBuffer(file, buf, mime) {
   return new Promise((resolve) => {
@@ -333,6 +348,7 @@ app.get('/api/bunny-upload-status', async (req, res) => {
   let received = 0;
   try { received = fs.existsSync(vjChunkPath(f)) ? fs.statSync(vjChunkPath(f)).size : ((vjDoneMap[f] && vjDoneMap[f].total) || 0); } catch (e) {}
   let d = vjDoneMap[f];
+  // Poora file aa chuka lekin Bunny PUT reh gaya tha — yahin dobara try ho jata hai
   if (d && !d.done && d.total && received >= d.total) d = await vjFinalizeToBunny(f);
   res.json({ ok: true, received: received, done: !!(d && d.done), bunnyOk: !(d && d.bunnyOk === false) });
 });
@@ -373,70 +389,6 @@ app.delete('/api/bunny-delete', (req, res) => {
   r.on('error',e=>res.status(500).json({error:e.message})); r.end();
 });
 
-app.get('/api/migrate-legacy-prefix', async (req, res) => {
-  if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
-  const PREFIX = 'ws_biz-v5b5j6__';
-  const results = [];
-
-  function bunnyList() {
-    return new Promise((resolve, reject) => {
-      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/',method:'GET',headers:{'AccessKey':BUNNY_KEY,'Accept':'application/json'}},(resp)=>{
-        let d=''; resp.on('data',c=>d+=c); resp.on('end',()=>{ try{ resolve(JSON.parse(d)); }catch(e){ reject(e); } });
-      });
-      r.on('error',reject); r.end();
-    });
-  }
-  function bunnyGetRaw(filename) {
-    return new Promise((resolve) => {
-      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'GET',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
-        if (resp.statusCode >= 400) return resolve(null);
-        const chunks=[]; resp.on('data',c=>chunks.push(c)); resp.on('end',()=>resolve(Buffer.concat(chunks)));
-      });
-      r.on('error',()=>resolve(null)); r.end();
-    });
-  }
-  function bunnyPutRaw(filename, buf) {
-    return new Promise((resolve) => {
-      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'PUT',headers:{'AccessKey':BUNNY_KEY,'Content-Type':'application/octet-stream','Content-Length':buf.length}},(resp)=>{
-        resp.on('data',()=>{}); resp.on('end',()=>resolve(resp.statusCode<300));
-      });
-      r.on('error',()=>resolve(false)); r.write(buf); r.end();
-    });
-  }
-  function bunnyDeleteRaw(filename) {
-    return new Promise((resolve) => {
-      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'DELETE',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
-        resp.on('data',()=>{}); resp.on('end',()=>resolve(resp.statusCode<300));
-      });
-      r.on('error',()=>resolve(false)); r.end();
-    });
-  }
-
-  try {
-    const files = await bunnyList();
-    const targets = (files || []).filter(f => f.ObjectName && f.ObjectName.indexOf(PREFIX) === 0 && !f.IsDirectory);
-    console.log('[MIGRATE] found ' + targets.length + ' files with prefix ' + PREFIX);
-    for (const f of targets) {
-      const oldName = f.ObjectName;
-      const newName = oldName.slice(PREFIX.length);
-      try {
-        const buf = await bunnyGetRaw(oldName);
-        if (!buf) { results.push({ oldName, status: 'download-failed' }); continue; }
-        const putOk = await bunnyPutRaw(newName, buf);
-        if (!putOk) { results.push({ oldName, status: 'upload-failed' }); continue; }
-        const delOk = await bunnyDeleteRaw(oldName);
-        results.push({ oldName, newName, status: delOk ? 'ok' : 'copied-but-old-not-deleted' });
-        console.log('[MIGRATE] ' + oldName + ' -> ' + newName + ' : ' + (delOk ? 'ok' : 'copy-only'));
-      } catch (e) {
-        results.push({ oldName, status: 'error', error: e.message });
-      }
-    }
-    res.json({ total: targets.length, results });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 app.get('/api/bunny-billing', (req, res) => {
   const key = req.query.key;
   if (!key) return res.status(400).json({ error: 'No account key' });
@@ -453,6 +405,7 @@ app.post('/api/railway-usage', jsonParser, (req, res) => {
   r.on('error',e=>res.status(500).json({error:e.message})); r.write(body); r.end();
 });
 
+// ══════ MUSIC HELPER — Bunny URL se /tmp par download ══════
 function vjDownloadMusic(url) {
   return new Promise((resolve) => {
     if (!url || !/^https:\/\//i.test(url)) return resolve(null);
@@ -471,6 +424,11 @@ function vjDownloadMusic(url) {
   });
 }
 
+// FIX (NEW — Auto-Trim Silence): video ke SHURU aur AAKHIR mein khamoshi
+// khud detect karo aur user ke manual trim ke upar additional trim laga do.
+// Sirf shuru/aakhir (boundary) trim hoti hai, beech mein kabhi nahi —
+// isliye result kabhi ajeeb/broken nahi lagta. Max 2.5 second har taraf
+// (safety cap) — koi accidental over-trim nahi.
 function detectLeadTrailSilence(filePath) {
   return new Promise((resolve) => {
     try {
@@ -534,6 +492,9 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
   let _rendered = false;
   let musicPath = null;
   let _keepOrig = (req.body.keepOriginal !== '0');
+  // FIX (NEW — audio-detection): check karo ke uploaded video mein
+  // audio stream MAUJOOD hai ya nahi, taake PARAMS mein saaf pata chale
+  // ke "original awaaz nahi aati" ka masla SOURCE video mein hai ya kahin aur.
   let _vfHasAudio = null;
   try {
     _vfHasAudio = await new Promise((resolve) => {
@@ -547,10 +508,22 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
   function doRender() {
     if (_rendered) return; _rendered = true;
     _lastRenderErr='STEP 2: doRender shuru, size='+_vfSize;
+    // ASLI SHAPE: video ke original dimensions hi rakho — na scale, na crop, na pad.
     const scaleF = 'scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p';
+    // Overlay PNG ko video ke har frame par overlay karo. eof_action=repeat se overlay
+    // poori video par rehta hai aur video poori length chalti hai (1 frame nahi).
     const fcOv = '[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[base];[1:v]scale=trunc(iw/2)*2:trunc(ih/2)*2[ov];[base][ov]overlay=0:0:eof_action=repeat:format=auto[outv]';
+    // FIX (ROOT CAUSE — cut/trim bilkul apply nahi ho raha tha): -t flag
+    // -i ke BAAD tha, jo FFmpeg mein sirf agle input par ya output par
+    // attach ho jata hai — us wajah se video ki poori length render hoti
+    // thi trim ke bawajood. Ab -t, -ss ke sath -i se PEHLE hai (input option),
+    // taake sirf vf.path input hi trim ho.
     const trimArgs = dur > 0.05 ? ['-ss', String(ts), '-t', String(dur), '-i', vf.path] : ['-i', vf.path];
 
+    // ══════ BACKGROUND MUSIC MIX ══════
+    // keepOrig = video ki asli awaaz rakhni hai ya nahi.
+    // Agar video mein audio track hi na ho to amix fail hota hai — neeche wala
+    // close-handler khud music-only par dobara try kar leta hai.
     function buildArgs(keepOrig) {
       if (!musicPath) {
         return of
@@ -572,13 +545,44 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
       bg += 'volume=' + mVol.toFixed(3);
       if (fadeIn > 0) bg += ',afade=t=in:st=0:d=' + fadeIn.toFixed(2);
       if (fadeOut > 0 && mixLen > fadeOut) bg += ',afade=t=out:st=' + (mixLen - fadeOut).toFixed(2) + ':d=' + fadeOut.toFixed(2);
-      bg += ',apad,atrim=duration=3600[bg]';
+      bg += ',apad,atrim=duration=3600[bg]';  // apad = video khatam hone tak khamoshi; atrim cap zaroori
+                                              // warna stream infinite ho jati hai aur muxer buffer bhar ke
+                                              // "No space left on device" error aata hai
 
       const vChain = of ? fcOv : '[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p[outv]';
 
       _lastRenderParams += ' | COMPUTED: ts='+ts+' te='+te+' dur='+dur+' oVol='+oVol+' mVol='+mVol+' keepOrig='+keepOrig+' -> BRANCH='+((keepOrig && oVol > 0)?'DUCKING(original+music dono)':'MUSIC-ONLY(original gayab)');
       let fc, aMap;
       if (keepOrig && oVol > 0) {
+        // FIX (NEW — smart auto-ducking): pehle music hamesha fixed volume par
+        // rehta tha, chahe video ki apni awaaz bol rahi ho ya khamoshi ho —
+        // isi wajah se awaaz aur music aapas mein takrate the. Ab
+        // sidechaincompress filter original awaaz (oa) ko "detector" bana kar
+        // music (bg) ka volume real-time mein khud control karta hai: jab
+        // awaaz bole, music khud halka ho jata hai; jab awaaz ruke/khamosh
+        // ho, music khud wapas upar aa jata hai. Podcasts/YouTube mein isi
+        // technique ko "ducking" kehte hain.
+        // threshold=0.04 (~-28dB) — halki si bhi awaaz duck trigger kar de
+        // ratio=10 — mazboot ducking taake awaaz hamesha saaf sunaayi de
+        // attack=8ms — awaaz shuru hote hi turant music halka ho jaye
+        // release=350ms — awaaz rukte hi thodi si smooth der se music upar aaye (achanak jhatka na lage)
+        // FIX (ROOT CAUSE — final video mein sirf music, original sound gayab):
+        // video ki apni audio aur music file ki sample-rate/channel-layout
+        // aksar match nahi karte the, jis wajah se sidechaincompress/amix
+        // FFmpeg mein fail ho jata tha aur code khamoshi se music-only retry
+        // kar leta tha (neeche wala close-handler). Ab dono streams ko
+        // sidechain/amix se PEHLE ek common format (44100Hz stereo) mein
+        // normalize karte hain — isse yeh mismatch-failure khatam ho jati hai
+        // aur original awaaz hamesha final video mein bhi bachi rehti hai,
+        // bilkul preview jaisa.
+        // FIX (ROOT CAUSE — asal wajah, confirm shuda): [oa] label do jagah
+        // (sidechaincompress aur amix) use ho raha tha. FFmpeg mein ek filter
+        // output label sirf EK dafa aage kisi filter ko diya ja sakta hai —
+        // dusri dafa use karne par wo resolve nahi hota aur FFmpeg use
+        // stream-specifier samajh kar "Invalid stream specifier: oa" error
+        // deta hai (isi wajah se ducking hamesha fail ho rahi thi aur
+        // music-only fallback chal raha tha). Fix: asplit se [oa] ki 2
+        // alag copies bana do — ek detector ke liye, ek final mix ke liye.
         fc = vChain + ';' + bg + ';[0:a]volume=' + oVol.toFixed(3) + ',aformat=sample_rates=44100:channel_layouts=stereo,asplit=2[oa1][oa2];'
            + '[bg]aformat=sample_rates=44100:channel_layouts=stereo[bgf];'
            + '[bgf][oa1]sidechaincompress=threshold=0.04:ratio=10:attack=8:release=350:makeup=1[duckedbg];'
@@ -605,11 +609,17 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
     let err = '';
     ff.stderr.on('data', d => { err += d.toString(); _lastRenderErr='STEP 4: FFmpeg chal raha\n\n'+err.slice(-1500); });
     ff.on('close', code => {
+      // ── Video mein audio track hi nahi tha? Music-only par ek dafa dobara try karo ──
       if (code !== 0 && musicPath && _keepOrig) {
         _keepOrig = false;
         _rendered = false;
         console.log('[RENDER] ducking/amix fail -> music-only retry. ORIGINAL ERROR:', err.slice(-800));
+        // FIX: asal error ab retry ke overwrite se pehle safe kar lete hain,
+        // taake /api/lasterror par pata chal sake ke ducking kyun fail hui thi
         _lastRenderErr = 'PRIMARY (with-original-audio) ATTEMPT FAILED, retrying music-only.\n\nORIGINAL ERROR:\n' + err.slice(-1200) + '\n\n---RETRY BELOW---';
+        // FIX (NEW): ye ab PARAMS wale permanent variable mein bhi save hota
+        // hai, taake retry ka STEP 4 progress ise overwrite na kar sake aur
+        // /api/lasterror par DUCKING fail hone ki asal wajah hamesha dikhe.
         _lastRenderParams += '\n\n!!! DUCKING FAILED, YE RAHI ASAL WAJAH !!!\n' + err.slice(-1200);
         return doRender();
       }
@@ -625,6 +635,8 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
     });
     setTimeout(() => { ff.kill('SIGKILL'); if (!res.headersSent) { _lastRenderErr='TIMEOUT 900s | size:'+_vfSize; res.status(500).json({ error: 'Timeout' }); } }, 900000);
   }
+  // AUTO-ROTATE: FFmpeg khud rotation metadata padh ke seedha kar leta hai — manual transpose nahi.
+  // Music multipart mein aayi? warna Bunny URL se download karo, phir render.
   const mfUp = req.files['music'] && req.files['music'][0];
   if (mfUp) {
     musicPath = mfUp.path;
@@ -642,6 +654,12 @@ app.post('/api/render', (req,res,next)=>{ _lastRenderErr='STEP 0: /api/render re
   }
 });
 
+// FIX (NEW — jaisa maanga gaya): "Video would not load" fix — jab koi
+// video ka format/codec (jaise HEVC/H.265, VP9, ya koi khaas phone-specific
+// encoding) kisi doosre phone ke WebView mein decode nahi ho pata, isay
+// yahan bhej kar universal H.264/AAC MP4 mein convert kar dete hain — jo
+// HAR Android WebView reliably khol sakta hai. Koi trim/overlay/music
+// nahi — sirf format-normalize, is liye render se kaafi tez aur halka hai.
 app.post('/api/transcode', upload.fields([{name:'video',maxCount:1}]), async (req, res) => {
   const vf = req.files && req.files['video'] && req.files['video'][0];
   if (!vf) return res.status(400).json({ error: 'No video' });
@@ -651,6 +669,18 @@ app.post('/api/transcode', upload.fields([{name:'video',maxCount:1}]), async (re
 
   const out = '/tmp/transcoded_' + Date.now() + '.mp4';
   const { spawn } = require('child_process');
+  // ── Sirf format-normalize karo: original resolution/orientation waisi
+  // hi rehti hai (FFmpeg khud rotation-metadata sidha kar leta hai), sirf
+  // codec ko universally-compatible H.264/AAC mein badal dete hain. ──
+  // FIX (ROOT CAUSE — jaisa maanga gaya, "Gallery mein chalti hai app mein
+  // nahi"): confirm ho gaya ke aise videos (jaise Snapchat exports)
+  // "17 FPS" jaisi GHAIR-MUSTAQIL (variable) frame-rate ke sath bani hoti
+  // hain — Android Gallery ka lenient player ise chala leta hai, lekin
+  // WebView ka video-decoder aksar aise VFR content ko decode nahi kar
+  // pata. Pehle transcode bhi output ka frame-rate explicitly set nahi
+  // karta tha, is liye wapas ajeeb/VFR timing bana deta tha. Ab -r 30
+  // aur -vsync cfr (constant frame-rate) se hamesha ek saaf, standard
+  // 30fps output banta hai — jo har WebView reliably chala sake.
   const args = [
     '-y', '-i', vf.path,
     '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p',
@@ -677,12 +707,19 @@ app.post('/api/transcode', upload.fields([{name:'video',maxCount:1}]), async (re
     s.on('end', () => fs.unlink(out, () => {}));
     s.on('error', () => fs.unlink(out, () => {}));
   });
+  // Format-normalize hamesha render se halka/tez hota hai — 5 minute kaafi hai
   setTimeout(() => {
     ff.kill('SIGKILL');
     if (!res.headersSent) res.status(500).json({ error: 'Transcode timeout' });
   }, 300000);
 });
 
+// ══════ AUTOMATIC ERROR REPORTING — jaisa maanga gaya ══════
+// App mein kisi bhi user ke liye (chahe staff ho ya manager) agar koi
+// genuine JS crash/error ho, wo yahan khud-ba-khud record ho jata hai —
+// bina kisi ke bataye. Railway ke "Deploy Logs" mein LIVE dikhta hai,
+// aur Bunny par bhi ek rolling history file mein save hota hai (last 300),
+// taake purane errors baad mein bhi review ho sakein.
 let errorReports = [];
 const ERRORREPORTS_FILE = 'vj_error_reports.json';
 let _erSaveTimer = null;
@@ -699,6 +736,9 @@ app.post('/api/report-error', jsonParser, (req, res) => {
     const kind = b.kind === 'diag' ? 'diag' : 'error';
     let entry;
     if (kind === 'diag') {
+      // FIX (NEW — jaisa maanga gaya): VJDiag ke rich checkpoint-level
+      // reports (step/postKey/status/detail) — poori tafseel (file,
+      // method, variable, actual, reason, rootCause) samet.
       entry = {
         ts: Date.now(),
         when: new Date().toISOString(),
@@ -726,6 +766,7 @@ app.post('/api/report-error', jsonParser, (req, res) => {
         appVersion: String(b.appVersion || '').slice(0, 50),
         device: String(b.device || '').slice(0, 300)
       };
+      // ── LIVE VISIBILITY: Railway ke Deploy Logs mein turant dikhega ──
       console.log('[CLIENT-ERROR] ' + entry.business + ' / ' + entry.staffName + ' -> ' + entry.message + ' @ ' + entry.page);
     }
     errorReports.push(entry);
@@ -737,10 +778,20 @@ app.post('/api/report-error', jsonParser, (req, res) => {
   }
 });
 
-app.get('/api/error-reports', (req, res) => {
-  res.json(errorReports.slice().reverse());
-});
-
+// ══════ PHOTO + BACKGROUND MUSIC ══════
+// FIX (SIMPLIFIED — jaisa maanga gaya, poora "reel" system hataya): pehle
+// ye endpoint multi-photo Ken-Burns/crossfade "reel" bhi banata tha —
+// lekin client mein ab wo feature hi nahi bacha (koi button wired nahi
+// tha, dead code). Asal zaroorat simple hai: EK photo + background music
+// — static frame (koi zoom/pan animation nahi), default 10s (client se
+// 2-30s tak aata hai, Cutting slider se control hota hai).
+// FIX (ROOT CAUSE — jaisa maanga gaya, "video ke upar-neeche black jagah
+// aati hai"): pehle photo hamesha ek FIXED 1080x1920 canvas mein fit ki
+// jaati thi (decrease+pad) — agar photo ka apna ratio 1080x1920 se mel na
+// khaye, to bachi hui jagah black bar se bharni padti thi. Ab photo ki
+// ASAL dimensions FFmpeg se hi nikal kar (koi alag ffprobe binary ki
+// zaroorat nahi), output video USI ratio mein banate hain — jitni pic
+// hai, utna hi video, koi bhi extra black screen nahi.
 function vjProbeImageDims(ffmpegBin, imgPath) {
   return new Promise((resolve) => {
     try {
@@ -768,6 +819,10 @@ app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 1 },
 
   console.log('[PHOTO-MUSIC] duration=' + duration + 's, music=' + (musicFile ? 'yes' : 'no'));
 
+  // Photo ki apni ASAL dimensions detect karo — koi fixed canvas nahi.
+  // Width/height dono even (libx264 ki zaroorat) rakhte hain, aur bohot
+  // bade photo ko 1440px (longer side) tak cap karte hain taake encode
+  // fast rahe. Detect fail ho (bohot rare) to 1080x1920 fallback.
   const fps = 30;
   const dims = await vjProbeImageDims(FFMPEG_BIN, photo.path);
   let W, H;
@@ -788,6 +843,11 @@ app.post('/api/photos-to-video', upload.fields([{ name: 'photos', maxCount: 1 },
   const musicVolRaw = parseFloat(req.body.musicVol);
   const musicVol = isFinite(musicVolRaw) ? (musicVolRaw > 1 ? musicVolRaw / 100 : musicVolRaw) : 0.6;
 
+  // FIX (ROOT CAUSE — native background-upload se music silently drop ho
+  // rahi thi): pehle sirf uploaded 'music' FILE accept hoti thi. Native
+  // side (postPhotoMusic) 'musicUrl' STRING bhejta hai (bilkul /api/render
+  // ki tarah) — server khud Bunny CDN se download karta hai. Ab 'musicUrl'
+  // bhi accept hoti hai.
   let musicPath = musicFile ? musicFile.path : null;
   let _downloadedMusicPath = null;
   if (!musicPath && req.body.musicUrl) {
