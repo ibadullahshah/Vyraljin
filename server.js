@@ -366,6 +366,12 @@ app.post('/api/bunny-upload-chunk', (req, res) => {
       const body = Buffer.concat(chunks);
       if (!body.length) return res.status(400).json({ ok: false, error: 'empty chunk' });
       const p = vjChunkPath(f);
+      // FIX (ROOT CAUSE — "409 @0" hamesha aata tha): pichli baar upload
+      // beech mein fail hua tha to /tmp par purani adhoori chunk-file reh
+      // jaati thi. Naya upload hamesha offset=0 se shuru hota hai, lekin
+      // server purani file ke size se compare karke 409 de deta tha. Ab
+      // offset 0 par purani leftover file hamesha clear kar dete hain.
+      if (offset === 0) { try { if (fs.existsSync(p)) fs.unlinkSync(p); delete vjDoneMap[f]; } catch (e) {} }
       const cur = fs.existsSync(p) ? fs.statSync(p).size : 0;
       if (offset !== cur) return res.status(409).json({ ok: false, received: cur });
       fs.appendFileSync(p, body);
