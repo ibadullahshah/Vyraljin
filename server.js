@@ -373,7 +373,15 @@ app.post('/api/bunny-upload-chunk', (req, res) => {
       // offset 0 par purani leftover file hamesha clear kar dete hain.
       if (offset === 0) { try { if (fs.existsSync(p)) fs.unlinkSync(p); delete vjDoneMap[f]; } catch (e) {} }
       const cur = fs.existsSync(p) ? fs.statSync(p).size : 0;
-      if (offset !== cur) return res.status(409).json({ ok: false, received: cur });
+      // FIX (ROOT CAUSE — "409 @<mid-offset>" mobile/LTE network par aata
+      // tha): flaky connection kabhi kabhi ek hi chunk do dafa bhej deta
+      // hai (silent retry). Pehle hum aisi duplicate chunk ko bhi 409 de
+      // kar poora upload fail kar dete the. Ab agar chunk already mil
+      // chuki hai (offset < cur) to use chup-chaap ignore karte hain aur
+      // current progress bata dete hain — sirf asal "gap" (offset > cur)
+      // par hi fail karte hain.
+      if (offset < cur) return res.json({ ok: true, received: cur, done: false });
+      if (offset > cur) return res.status(409).json({ ok: false, received: cur });
       fs.appendFileSync(p, body);
       const now = fs.statSync(p).size;
       console.log('[CHUNK-UP] ' + f + ' @' + offset + ' +' + body.length + ' = ' + now + '/' + total);
