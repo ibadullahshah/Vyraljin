@@ -84,6 +84,20 @@ function saveTrashedPostsDebounced(){
 
 app.get('/', (req, res) => res.send('VyralJin Server OK'));
 app.get('/health', (req, res) => res.json({ status: 'ok', ver: 'v9.7-clean', ffmpeg: FFMPEG_BIN, bunny: !!BUNNY_KEY, bunnyHost: BUNNY_HOST, gemini: !!GEMINI_KEY }));
+// ══ TEMP DIAGNOSTIC: Railway env-vars ki asal Bunny zone/key (masked) dikhata
+// hai — taake Admin Config tab mein jo values dali hain unse compare kar sakein.
+// Poora key kabhi expose nahi hota, sirf shuru/aakhir ke 4 characters + length.
+// TESTING KHATAM HONE KE BAAD YE ENDPOINT HATA DENA — security ke liye. ══
+app.get('/api/debug-bunny-config', (req, res) => {
+  const mask = (s) => !s ? '(khaali)' : (s.length <= 8 ? '*'.repeat(s.length) : s.slice(0,4)+'...'+s.slice(-4));
+  res.json({
+    zone: BUNNY_ZONE || '(khaali — Railway Variables mein BUNNY_ZONE set nahi)',
+    zoneLength: (BUNNY_ZONE||'').length,
+    keyPreview: mask(BUNNY_KEY),
+    keyLength: (BUNNY_KEY||'').length,
+    bunnyHost: BUNNY_HOST
+  });
+});
 app.get('/api/config', (req, res) => res.json({
   pullzone: BUNNY_PULLZONE, hasBunny: !!BUNNY_KEY, hasGemini: !!GEMINI_KEY,
   hasFirebase: !!(FIREBASE_KEY && FIREBASE_DB_URL),
@@ -153,50 +167,18 @@ app.get('/api/trashed-posts', (req, res) => {
   res.json(trashedPosts);
 });
 
-// ===== SHARE-LOCK SYNC - cross-device (VyralJin) =====
-// Jab koi device kisi post ka multi-platform share shuru kare, 15-min lock
-// yahan record hota hai taake DOOSRA device isay sath hi sath share na kare.
-let shareLocks = {};
-const SHARELOCKS_FILE = 'vj_share_locks.json';
-let _slSaveTimer = null;
-const SHARE_LOCK_MS = 15 * 60 * 1000;
-bunnyGetJSON(SHARELOCKS_FILE).then(data=>{ if(data && typeof data==='object') shareLocks = data; }).catch(()=>{});
-function saveShareLocksDebounced(){
-  if(_slSaveTimer) clearTimeout(_slSaveTimer);
-  _slSaveTimer = setTimeout(()=>{ bunnyPutJSON(SHARELOCKS_FILE, shareLocks).catch(()=>{}); }, 3000);
-}
-function isLockExpired(lock){ return!lock || (Date.now() - lock.ts) > SHARE_LOCK_MS; }
-
-app.post('/api/lock-share', jsonParser, (req, res) => {
-  const videoURL = req.body && req.body.videoURL;
-  const deviceId = (req.body && req.body.deviceId) || 'unknown';
-  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
-  const existing = shareLocks[videoURL];
-  if (existing &&!isLockExpired(existing) && existing.deviceId!== deviceId) {
-    return res.json({ ok: true, locked: false, ownerDeviceId: existing.deviceId, remainingMs: SHARE_LOCK_MS - (Date.now() - existing.ts) });
-  }
-  shareLocks[videoURL] = { deviceId, ts: Date.now() };
-  saveShareLocksDebounced();
-  res.json({ ok: true, locked: true });
-});
-
-app.get('/api/share-lock', (req, res) => {
-  const existing = req.query.videoURL? shareLocks[req.query.videoURL] : null;
-  if (!existing || isLockExpired(existing)) return res.json({ locked: false });
-  res.json({ locked: true, ownerDeviceId: existing.deviceId, remainingMs: SHARE_LOCK_MS - (Date.now() - existing.ts) });
-});
-
-app.post('/api/unlock-share', jsonParser, (req, res) => {
-  const videoURL = req.body && req.body.videoURL;
-  const deviceId = (req.body && req.body.deviceId) || 'unknown';
-  if (!videoURL) return res.status(400).json({ error: 'No videoURL' });
-  const existing = shareLocks[videoURL];
-  if (existing && existing.deviceId === deviceId) { delete shareLocks[videoURL]; saveShareLocksDebounced(); }
-  res.json({ ok: true });
-});
-
 let _lastRenderErr='(abhi koi error nahi)';
 let _lastRenderParams='(abhi koi render nahi)';
+app.get('/api/lasterror',(req,res)=>res.type('text/plain').send('===PARAMS (permanent, overwrite nahi hote)===\n'+_lastRenderParams+'\n\n===LIVE STATUS===\n'+_lastRenderErr));
+// 🔬 TEST: sirf video receive karo, render NAHI — pata karne ke liye upload pohanchti hai ya nahi
+app.post('/api/uptest', upload.fields([{name:'video',maxCount:1}]), (req,res)=>{
+  const vf=req.files['video']?.[0];
+  let sz=0; try{sz=fs.statSync(vf.path).size;}catch(e){}
+  if(vf)fs.unlink(vf.path,()=>{});
+  _lastRenderErr='UPTEST: video mili! size='+sz+' bytes, time='+new Date().toISOString();
+  res.json({ok:true,size:sz});
+});
+
 app.post('/api/gemini', jsonParser, async (req, res) => {
   const _gT0 = Date.now();
   if (!GEMINI_KEY) { console.log('[GEMINI] FAIL: No Gemini key configured on server'); return res.status(400).json({ error: 'No Gemini key' }); }
@@ -366,22 +348,16 @@ app.post('/api/bunny-upload-chunk', (req, res) => {
       const body = Buffer.concat(chunks);
       if (!body.length) return res.status(400).json({ ok: false, error: 'empty chunk' });
       const p = vjChunkPath(f);
-      // FIX (ROOT CAUSE — "409 @0" hamesha aata tha): pichli baar upload
-      // beech mein fail hua tha to /tmp par purani adhoori chunk-file reh
-      // jaati thi. Naya upload hamesha offset=0 se shuru hota hai, lekin
-      // server purani file ke size se compare karke 409 de deta tha. Ab
-      // offset 0 par purani leftover file hamesha clear kar dete hain.
+      // FIX (ROOT CAUSE — "Music/Video N upload fail ho gaya" retries ke
+      // bawajood bhi aata tha): agar pichli baar upload beech mein fail hua
+      // tha to /tmp par purani adhoori chunk-file reh jaati thi. Naya upload
+      // hamesha offset=0 se shuru hota hai, lekin server us purani baaki
+      // file ke size se compare karke hamesha 409 de deta tha — retries bhi
+      // isi wajah se hamesha fail hote the. Ab offset 0 par purani leftover
+      // file hamesha clear kar dete hain taake har naya attempt saaf shuru ho.
       if (offset === 0) { try { if (fs.existsSync(p)) fs.unlinkSync(p); delete vjDoneMap[f]; } catch (e) {} }
       const cur = fs.existsSync(p) ? fs.statSync(p).size : 0;
-      // FIX (ROOT CAUSE — "409 @<mid-offset>" mobile/LTE network par aata
-      // tha): flaky connection kabhi kabhi ek hi chunk do dafa bhej deta
-      // hai (silent retry). Pehle hum aisi duplicate chunk ko bhi 409 de
-      // kar poora upload fail kar dete the. Ab agar chunk already mil
-      // chuki hai (offset < cur) to use chup-chaap ignore karte hain aur
-      // current progress bata dete hain — sirf asal "gap" (offset > cur)
-      // par hi fail karte hain.
-      if (offset < cur) return res.json({ ok: true, received: cur, done: false });
-      if (offset > cur) return res.status(409).json({ ok: false, received: cur });
+      if (offset !== cur) return res.status(409).json({ ok: false, received: cur });
       fs.appendFileSync(p, body);
       const now = fs.statSync(p).size;
       console.log('[CHUNK-UP] ' + f + ' @' + offset + ' +' + body.length + ' = ' + now + '/' + total);
@@ -401,6 +377,73 @@ app.delete('/api/bunny-delete', (req, res) => {
   if (!file) return res.status(400).json({ error: 'No filename' });
   const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+decodeURIComponent(file),method:'DELETE',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{let d='';resp.on('data',c=>d+=c);resp.on('end',()=>res.json({status:resp.statusCode,ok:resp.statusCode<300}));});
   r.on('error',e=>res.status(500).json({error:e.message})); r.end();
+});
+
+// ── ONE-TIME MIGRATION: 'ws_biz-v5b5j6__' prefix wali files ko bina-prefix
+// naam par copy kar ke purani (prefix wali) delete kar deta hai. Sirf ek
+// dafa use karne ke liye — kaam ho jaye to ye poora route hata dena. ──
+app.get('/api/migrate-legacy-prefix', async (req, res) => {
+  if (!BUNNY_KEY || !BUNNY_ZONE) return res.status(400).json({ error: 'No bunny config' });
+  const PREFIX = 'ws_biz-v5b5j6__';
+  const results = [];
+
+  function bunnyList() {
+    return new Promise((resolve, reject) => {
+      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/',method:'GET',headers:{'AccessKey':BUNNY_KEY,'Accept':'application/json'}},(resp)=>{
+        let d=''; resp.on('data',c=>d+=c); resp.on('end',()=>{ try{ resolve(JSON.parse(d)); }catch(e){ reject(e); } });
+      });
+      r.on('error',reject); r.end();
+    });
+  }
+  function bunnyGetRaw(filename) {
+    return new Promise((resolve) => {
+      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'GET',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
+        if (resp.statusCode >= 400) return resolve(null);
+        const chunks=[]; resp.on('data',c=>chunks.push(c)); resp.on('end',()=>resolve(Buffer.concat(chunks)));
+      });
+      r.on('error',()=>resolve(null)); r.end();
+    });
+  }
+  function bunnyPutRaw(filename, buf) {
+    return new Promise((resolve) => {
+      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'PUT',headers:{'AccessKey':BUNNY_KEY,'Content-Type':'application/octet-stream','Content-Length':buf.length}},(resp)=>{
+        resp.on('data',()=>{}); resp.on('end',()=>resolve(resp.statusCode<300));
+      });
+      r.on('error',()=>resolve(false)); r.write(buf); r.end();
+    });
+  }
+  function bunnyDeleteRaw(filename) {
+    return new Promise((resolve) => {
+      const r = https.request({hostname:BUNNY_HOST,path:'/'+encodeURIComponent(BUNNY_ZONE)+'/'+encodeURIComponent(filename),method:'DELETE',headers:{'AccessKey':BUNNY_KEY}},(resp)=>{
+        resp.on('data',()=>{}); resp.on('end',()=>resolve(resp.statusCode<300));
+      });
+      r.on('error',()=>resolve(false)); r.end();
+    });
+  }
+
+  try {
+    const files = await bunnyList();
+    const targets = (files || []).filter(f => f.ObjectName && f.ObjectName.indexOf(PREFIX) === 0 && !f.IsDirectory);
+    console.log('[MIGRATE] found ' + targets.length + ' files with prefix ' + PREFIX);
+    for (const f of targets) {
+      const oldName = f.ObjectName;
+      const newName = oldName.slice(PREFIX.length);
+      try {
+        const buf = await bunnyGetRaw(oldName);
+        if (!buf) { results.push({ oldName, status: 'download-failed' }); continue; }
+        const putOk = await bunnyPutRaw(newName, buf);
+        if (!putOk) { results.push({ oldName, status: 'upload-failed' }); continue; }
+        const delOk = await bunnyDeleteRaw(oldName);
+        results.push({ oldName, newName, status: delOk ? 'ok' : 'copied-but-old-not-deleted' });
+        console.log('[MIGRATE] ' + oldName + ' -> ' + newName + ' : ' + (delOk ? 'ok' : 'copy-only'));
+      } catch (e) {
+        results.push({ oldName, status: 'error', error: e.message });
+      }
+    }
+    res.json({ total: targets.length, results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/bunny-billing', (req, res) => {
@@ -790,6 +833,11 @@ app.post('/api/report-error', jsonParser, (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── History dekhne ke liye — browser mein seedha kholein ──
+app.get('/api/error-reports', (req, res) => {
+  res.json(errorReports.slice().reverse());
 });
 
 // ══════ PHOTO + BACKGROUND MUSIC ══════
